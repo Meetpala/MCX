@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APEX-3 Operator Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="navbar">
+        <div class="brand">
+            <span class="logo">⚡ APEX-3</span>
+            <span class="subtitle">Zerodha Intraday Quantitative Engine</span>
+        </div>
+        <div class="header-badges">
+            <span id="badge-mode" class="badge badge-paper">MODE: PAPER</span>
+            <span id="badge-status" class="badge badge-active">🟢 ACTIVE</span>
+            <span id="badge-kite" class="badge badge-auth-bad">🔴 ZERODHA: CHECKING</span>
+            <span id="badge-angel" class="badge badge-auth-ok">🟢 ANGEL: FEED OK</span>
+            <span id="badge-clock" class="badge badge-neutral">--:--:-- IST</span>
+            <span id="badge-session" class="badge badge-info">SESSION: --</span>
+        </div>
+        <div class="header-actions" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <a href="/login/kite" target="_blank" class="btn btn-info" style="text-decoration:none; display:inline-flex; align-items:center; font-weight:600;">🔑 Login Zerodha</a>
+            <input type="text" id="input-request-token" placeholder="Paste Redirect URL or request_token" style="padding:6px 10px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#f8fafc; font-size:0.85rem; width:240px;" />
+            <button class="btn btn-primary" onclick="submitRedirectToken()">⚡ Activate Token</button>
+            <button id="btn-test-order" class="btn btn-secondary" onclick="testVmOrder()" style="background:#2563eb; color:#ffffff; font-weight:600; border:none; padding:6px 12px; border-radius:6px; cursor:pointer;">🧪 Test Order on VM</button>
+            <button id="btn-pause" class="btn btn-warning" onclick="togglePause()">Pause Strategy</button>
+            <button id="btn-flatten" class="btn btn-danger" onclick="emergencyFlatten()">⚠️ Emergency Flatten</button>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Dynamic Alerts Container -->
+        <div id="alerts-container"></div>
+
+        <!-- Top Metrics Overview Grid (4 Cards) -->
+        <section class="grid-4">
+            <!-- Card 1: Margins -->
+            <div class="card">
+                <h3>💰 Account Margins (Kite Connect)</h3>
+                <div class="metric-row">
+                    <span class="label">Available Margin:</span>
+                    <strong id="margin-avail" class="value text-success" style="font-size:1.15rem;">₹0.00</strong>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Utilised Margin:</span>
+                    <span id="margin-used" class="value">₹0.00</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Net Equity:</span>
+                    <span id="margin-net" class="value">₹0.00</span>
+                </div>
+                <p class="text-muted text-sm mt-2">4.0x MIS leverage ceiling; 2 slots concurrent; ₹120 max stop risk.</p>
+            </div>
+
+            <!-- Card 2: P&L & Trades -->
+            <div class="card">
+                <h3>📈 Today's P&L & Trades</h3>
+                <div class="metric-row">
+                    <span class="label">Net Realized P&L:</span>
+                    <strong id="pnl-net" class="value" style="font-size:1.15rem;">₹0.00</strong>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Unrealized MTM:</span>
+                    <span id="pnl-unrealized" class="value">₹0.00</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Statutory Charges:</span>
+                    <span id="pnl-charges" class="value text-muted">₹0.00</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">Completed Trades:</span>
+                    <span id="pnl-trades" class="value">0</span>
+                </div>
+            </div>
+
+            <!-- Card 3: Market Regime -->
+            <div class="card">
+                <h3>🏛️ Market Regime (NIFTY 50)</h3>
+                <div class="metric-row">
+                    <span class="label">Regime State:</span>
+                    <strong id="regime-status" class="value" style="font-size:1.1rem;">--</strong>
+                </div>
+                <div class="metric-row">
+                    <span class="label">5m ADX:</span>
+                    <span id="regime-adx" class="value">--</span>
+                </div>
+                <div class="metric-row">
+                    <span class="label">EMA-20 Slope:</span>
+                    <span id="regime-slope" class="value">--</span>
+                </div>
+                <p id="regime-desc" class="text-muted text-sm mt-2">Checking benchmark OHLC trend...</p>
+            </div>
+
+            <!-- Card 4: Active Watchlist -->
+            <div class="card">
+                <h3>🎯 Radar Universe (<span id="watchlist-count">11</span> Stocks)</h3>
+                <div id="watchlist-display" class="tag-container mb-2" style="max-height:85px; overflow-y:auto;">
+                    <span class="tag">Loading...</span>
+                </div>
+                <div class="input-group">
+                    <input type="text" id="input-symbols" placeholder="Custom: e.g. TCS, RELIANCE" />
+                    <button class="btn btn-primary btn-sm" onclick="saveWatchlist()">Update</button>
+                </div>
+                <p class="text-muted text-sm mt-1">6 Core + 5 Extended Radar Universe active.</p>
+            </div>
+        </section>
+
+        <!-- Current Pipeline Decisions & Gates -->
+        <section class="card mt-3">
+            <h3>🔍 Current Engine Evaluation & Gates</h3>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Decision</th>
+                            <th>Reason / Gate Explanation</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="decisions-tbody">
+                        <tr><td colspan="4" class="text-center">Evaluating strategy pipeline...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Active Positions & Protective Stops -->
+        <section class="card mt-3">
+            <h3>🛡️ Open Strategy MIS Positions & Protective Stops</h3>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Quantity</th>
+                            <th>Avg Fill</th>
+                            <th>Protective Stop</th>
+                            <th>Favorable Price</th>
+                            <th>Progress (R)</th>
+                            <th>Trail Status</th>
+                            <th>Mods (Max 25)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-tbody">
+                        <tr><td colspan="9" class="text-center">No open positions (Book is Flat)</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Live Tradebook & Order Execution History -->
+        <section class="card mt-3">
+            <h3>⚡ Today's Live Tradebook & Order Execution History</h3>
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Time (IST)</th>
+                            <th>Order ID</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Type</th>
+                            <th>Qty / Fill</th>
+                            <th>Price / Avg Price</th>
+                            <th>Status</th>
+                            <th>Broker Response / Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody id="orders-tbody">
+                        <tr><td colspan="9" class="text-center text-muted">No orders placed today</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Event Journal -->
+        <section class="card mt-3">
+            <h3>📜 Live Audit & Decision Journal</h3>
+            <div id="events-log" class="log-stream">
+                <div class="log-entry">Waiting for strategy cycle...</div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const OPERATOR_TOKEN = "{{ operator_token }}";
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status', {
+                    headers: { 'X-Operator-Token': OPERATOR_TOKEN }
+                });
+
+                if (res.status === 401) {
+                    document.getElementById('alerts-container').innerHTML = `
+                        <div class="alert-banner">
+                            <span>🔒 <strong>OPERATOR UNAUTHORIZED</strong>: Dashboard API token missing or mismatched.</span>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const data = await res.json();
+                
+                // Clock & Badges
+                document.getElementById('badge-clock').textContent = data.timestamp_ist || '--:--:-- IST';
+                
+                // Mode Badge
+                const modeBadge = document.getElementById('badge-mode');
+                if (data.mode === 'LIVE') {
+                    modeBadge.className = 'badge badge-live-pulse';
+                    modeBadge.innerHTML = '● LIVE TRADING';
+                } else {
+                    modeBadge.className = 'badge badge-paper';
+                    modeBadge.textContent = 'MODE: PAPER';
+                }
+
+                // Strategy Status Badge
+                const statusBadge = document.getElementById('badge-status');
+                if (data.is_paused) {
+                    statusBadge.className = 'badge badge-paused';
+                    statusBadge.textContent = '⏸️ PAUSED';
+                } else {
+                    statusBadge.className = 'badge badge-active';
+                    statusBadge.textContent = '🟢 ACTIVE';
+                }
+
+                // Kite Authorization Badge
+                const kiteBadge = document.getElementById('badge-kite');
+                if (data.kite_authorized) {
+                    kiteBadge.className = 'badge badge-auth-ok';
+                    kiteBadge.textContent = '🟢 ZERODHA: AUTHORIZED';
+                } else {
+                    kiteBadge.className = 'badge badge-auth-bad';
+                    kiteBadge.textContent = '🔴 ZERODHA: NOT AUTHORIZED';
+                }
+
+                // Angel Feed Badge
+                const angelBadge = document.getElementById('badge-angel');
+                if (data.angel_connected) {
+                    angelBadge.className = 'badge badge-auth-ok';
+                    angelBadge.textContent = '🟢 ANGEL: FEED OK';
+                } else {
+                    angelBadge.className = 'badge badge-auth-bad';
+                    angelBadge.textContent = '🔴 ANGEL: DISCONNECTED';
+                }
+
+                // Session State Badge
+                document.getElementById('badge-session').textContent = 'SESSION: ' + (data.session ? data.session.state : '--');
+                
+                // Pause button state
+                const btnPause = document.getElementById('btn-pause');
+                if (data.is_paused) {
+                    btnPause.textContent = '▶️ Resume Strategy';
+                    btnPause.className = 'btn btn-success';
+                } else {
+                    btnPause.textContent = '⏸️ Pause Strategy';
+                    btnPause.className = 'btn btn-warning';
+                }
+
+                // Dynamic Alerts Banner
+                const alertsContainer = document.getElementById('alerts-container');
+                let alertsHtml = '';
+                if (!data.kite_authorized) {
+                    alertsHtml += `
+                        <div class="alert-banner">
+                            <div>
+                                <strong>⚠️ ZERODHA SESSION NOT AUTHORIZED OR EXPIRED</strong>: 
+                                Live order execution is locked. Click <strong>[🔑 Login Zerodha]</strong> to authenticate, then paste the redirect URL into the box above and click <strong>[⚡ Activate Token]</strong>.
+                            </div>
+                        </div>
+                    `;
+                }
+                if (data.is_paused) {
+                    alertsHtml += `
+                        <div class="alert-banner warning">
+                            <div>
+                                <strong>⏸️ STRATEGY EXECUTION PAUSED</strong>: 
+                                ${data.pause_reason || 'Manual Operator Pause'}. Existing positions remain monitored. Click <strong>[▶️ Resume Strategy]</strong> to resume new entry evaluations.
+                            </div>
+                        </div>
+                    `;
+                }
+                alertsContainer.innerHTML = alertsHtml;
+
+                // Margins
+                if (data.margins) {
+                    document.getElementById('margin-avail').textContent = '₹' + (data.margins.available || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                    document.getElementById('margin-used').textContent = '₹' + (data.margins.used || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                    document.getElementById('margin-net').textContent = '₹' + (data.margins.net || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                }
+
+                // P&L & Trades
+                if (data.pnl) {
+                    const pnlNetEl = document.getElementById('pnl-net');
+                    const netVal = data.pnl.net || 0;
+                    pnlNetEl.textContent = (netVal >= 0 ? '+₹' : '-₹') + Math.abs(netVal).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                    pnlNetEl.className = 'value ' + (netVal > 0 ? 'text-success' : (netVal < 0 ? 'text-danger' : ''));
+
+                    const pnlUnrealEl = document.getElementById('pnl-unrealized');
+                    const unVal = data.pnl.unrealized || 0;
+                    pnlUnrealEl.textContent = (unVal >= 0 ? '+₹' : '-₹') + Math.abs(unVal).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                    pnlUnrealEl.className = 'value ' + (unVal > 0 ? 'text-success' : (unVal < 0 ? 'text-danger' : 'text-muted'));
+
+                    document.getElementById('pnl-charges').textContent = '₹' + (data.pnl.charges || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+                    document.getElementById('pnl-trades').textContent = (data.pnl.trade_count || 0).toString();
+                }
+
+                // Market Regime
+                if (data.regime) {
+                    const rState = document.getElementById('regime-status');
+                    rState.textContent = data.regime.state || '--';
+                    rState.className = 'value ' + (data.regime.state === 'BULLISH' ? 'text-success' : (data.regime.state === 'BEARISH' ? 'text-danger' : 'text-warning'));
+                    document.getElementById('regime-adx').textContent = data.regime.adx ? data.regime.adx.toFixed(1) : '--';
+                    document.getElementById('regime-slope').textContent = data.regime.ema_slope > 0 ? 'Rising ↗' : (data.regime.ema_slope < 0 ? 'Falling ↘' : 'Flat →');
+                    document.getElementById('regime-desc').textContent = data.regime.reason || '';
+                }
+
+                // Watchlist
+                const wlDiv = document.getElementById('watchlist-display');
+                if (data.watchlist && data.watchlist.length > 0) {
+                    document.getElementById('watchlist-count').textContent = data.watchlist.length;
+                    wlDiv.innerHTML = data.watchlist.map(s => `<span class="tag">${s}</span>`).join(' ');
+                } else {
+                    document.getElementById('watchlist-count').textContent = '0';
+                    wlDiv.innerHTML = '<span class="text-muted">No symbols configured</span>';
+                }
+
+                // Decisions
+                const dTbody = document.getElementById('decisions-tbody');
+                if (data.decisions && data.decisions.length > 0) {
+                    dTbody.innerHTML = data.decisions.map(d => `
+                        <tr>
+                            <td><strong>${d.symbol}</strong></td>
+                            <td><span class="badge ${d.decision === 'WAIT' ? 'badge-neutral' : (d.decision === 'EXIT' ? 'badge-danger' : 'badge-success')}">${d.decision}</span></td>
+                            <td class="text-sm">${d.reason}</td>
+                            <td><code>${d.action}</code></td>
+                        </tr>
+                    `).join('');
+                } else {
+                    dTbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No active evaluation</td></tr>';
+                }
+
+                // Positions
+                const pTbody = document.getElementById('positions-tbody');
+                if (data.open_positions && data.open_positions.length > 0) {
+                    pTbody.innerHTML = data.open_positions.map(p => `
+                        <tr>
+                            <td><strong>${p.symbol}</strong></td>
+                            <td><span class="badge ${p.side === 'BUY' ? 'badge-success' : 'badge-danger'}">${p.side}</span></td>
+                            <td>${p.quantity}</td>
+                            <td>₹${p.average_entry.toFixed(2)}</td>
+                            <td><strong class="text-warning">₹${p.current_stop.toFixed(2)}</strong></td>
+                            <td>₹${p.best_favorable_price.toFixed(2)}</td>
+                            <td><strong>+${p.r_multiple}R</strong></td>
+                            <td>${p.trail_activated ? '<span class="text-success">Active 🎯</span>' : '<span class="text-muted">Waiting +1R</span>'}</td>
+                            <td>${p.modification_count}/25</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    pTbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No open positions (Book is Flat)</td></tr>';
+                }
+
+                // Tradebook & Orders
+                const oTbody = document.getElementById('orders-tbody');
+                const allOrders = (data.live_orders && data.live_orders.length > 0) ? data.live_orders : (data.journal_orders || []);
+                if (allOrders.length > 0) {
+                    oTbody.innerHTML = allOrders.map(o => {
+                        const statusClass = 
+                            o.status === 'COMPLETE' ? 'status-complete' :
+                            (o.status === 'REJECTED' ? 'status-rejected' :
+                            (o.status === 'CANCELLED' ? 'status-cancelled' :
+                            (o.status === 'OPEN' ? 'status-open' : 'status-pending')));
+                        const sideClass = (o.side === 'BUY') ? 'side-buy' : 'side-sell';
+                        const pxDisplay = (o.order_type === 'MARKET') ? 'MARKET' : ('₹' + parseFloat(o.price || 0).toFixed(2));
+                        const avgPxDisplay = (o.average_price && o.average_price > 0) ? (' / ₹' + parseFloat(o.average_price).toFixed(2)) : '';
+                        return `
+                            <tr>
+                                <td class="text-muted text-sm">${o.updated_at || '--'}</td>
+                                <td><code>${o.order_id}</code></td>
+                                <td><strong>${o.symbol}</strong></td>
+                                <td class="${sideClass}">${o.side}</td>
+                                <td><span class="tag">${o.order_type}</span></td>
+                                <td>${o.filled_quantity || 0} / ${o.quantity || 0}</td>
+                                <td>${pxDisplay}${avgPxDisplay}</td>
+                                <td><span class="status-pill ${statusClass}">${o.status}</span></td>
+                                <td class="text-sm text-muted">${o.status_message || o.source || '--'}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                } else {
+                    oTbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No orders placed today</td></tr>';
+                }
+
+                // Recent Events Journal
+                const eDiv = document.getElementById('events-log');
+                if (data.recent_events && data.recent_events.length > 0) {
+                    eDiv.innerHTML = data.recent_events.map(e => `
+                        <div class="log-entry">
+                            <span class="text-muted">[${e.timestamp_ist.split('T')[1].split('.')[0]}]</span>
+                            <strong>${e.event_type}</strong> ${e.symbol ? `(${e.symbol})` : ''} - ${e.explanation}
+                        </div>
+                    `).join('');
+                }
+            } catch (err) {
+                console.error("Fetch status failed", err);
+            }
+        }
+
+        function submitRedirectToken() {
+            const raw = (document.getElementById('input-request-token').value || '').trim();
+            if (!raw) {
+                alert("Paste the redirected URL (containing request_token=...) or the request_token itself.");
+                return;
+            }
+            let reqToken = raw;
+            if (raw.includes("request_token=")) {
+                const match = raw.match(/[?&]request_token=([^&#\s]+)/);
+                if (match && match[1]) {
+                    reqToken = match[1];
+                }
+            }
+            window.location.href = "/auth/callback?request_token=" + encodeURIComponent(reqToken);
+        }
+
+        async function testVmOrder() {
+            const sym = prompt("Enter stock symbol to test order placement on Zerodha (or leave empty for default 'IDEA'):", "IDEA");
+            if (sym === null) return;
+            const targetSym = (sym.trim().toUpperCase() || "IDEA");
+
+            const btn = document.getElementById('btn-test-order');
+            if (btn) btn.innerText = "⏳ Placing on Zerodha...";
+            try {
+                const res = await fetch('/api/test_order', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Operator-Token': OPERATOR_TOKEN
+                    },
+                    body: JSON.stringify({ symbol: targetSym })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    alert(`✅ VM ORDER TEST SUCCESS!\n\nOrder ID: ${data.order_id}\nSymbol: ${data.placed_symbol} @ ₹${data.placed_price}\nVariety: ${data.placed_variety}\nCancellation: ${data.cancel_attempt}\nOrder Book Status: ${data.orderbook_status}\nExecuted By: ${data.origin}`);
+                } else {
+                    alert(`❌ VM Order Test Failed: ${data.message}`);
+                }
+                fetchStatus();
+            } catch (err) {
+                alert(`Error executing test order: ${err}`);
+            } finally {
+                if (btn) btn.innerText = "🧪 Test Order on VM";
+            }
+        }
+
+        async function togglePause() {
+            await fetch('/api/pause', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Operator-Token': OPERATOR_TOKEN
+                },
+                body: JSON.stringify({})
+            });
+            fetchStatus();
+        }
+
+        async function emergencyFlatten() {
+            if (confirm("CONFIRM EMERGENCY FLATTEN: This will cancel all strategy orders and market exit all strategy MIS positions immediately.")) {
+                const res = await fetch('/api/emergency_flatten', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Operator-Token': OPERATOR_TOKEN
+                    }
+                });
+                const data = await res.json();
+                alert(data.message);
+                fetchStatus();
+            }
+        }
+
+        async function saveWatchlist() {
+            const val = document.getElementById('input-symbols').value;
+            const symbols = val.split(',').map(s => s.trim().toUpperCase()).filter(s => s.length > 0);
+            if (symbols.length === 0) return alert("Please enter at least 1 symbol");
+            if (symbols.length > 3) return alert("APEX-3 allows maximum 3 symbols in custom watchlist");
+
+            await fetch('/api/watchlist', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Operator-Token': OPERATOR_TOKEN
+                },
+                body: JSON.stringify({symbols: symbols})
+            });
+            document.getElementById('input-symbols').value = '';
+            fetchStatus();
+        }
+
+        setInterval(fetchStatus, 2000);
+        fetchStatus();
+    </script>
+</body>
+</html>

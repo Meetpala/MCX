@@ -1,0 +1,143 @@
+# apex3/config.yaml — APEX-3-MCX Precious Metals Production Configuration
+
+mode: "paper"  # "paper" or "live"
+paper_starting_capital: 30000.00
+
+exchange: "MCX"
+margin_segment: "commodity"
+fetch_live_zerodha_margin: true
+base_capital_inr: 30000.0
+safety_reserve_buffer_pct: 0.05
+max_concurrent_positions: 2
+max_new_entries_per_bar: 1
+per_trade_risk_pct: 0.0125          # ₹375.00 max charge-bounded net loss per trade on ₹30k
+daily_max_loss_pct: 0.0250          # -₹750.00 hard daily stop triggers flatten_sequence
+bound_loss_with_charges: true
+max_fee_to_profit_ratio: 0.18       # Charges must be <= 18% of expected 2.0R gross profit
+
+universe:
+  core_watchlist:
+    - symbol_root: "SILVERMIC"
+      lot_multiplier: 1
+      tick_size: 1.0
+      max_spread_bps: 3.5
+      min_atr_pct: 0.0014
+    - symbol_root: "GOLDGUINEA"
+      lot_multiplier: 1
+      tick_size: 1.0
+      max_spread_bps: 5.0
+      min_atr_pct: 0.0010
+  scale_up_watchlist:               # Enabled automatically when live_balance >= ₹1,50,000
+    - symbol_root: "SILVERM"
+      lot_multiplier: 5
+      tick_size: 1.0
+      max_spread_bps: 3.0
+      min_atr_pct: 0.0014
+    - symbol_root: "GOLDM"
+      lot_multiplier: 10
+      tick_size: 1.0
+      max_spread_bps: 3.0
+      min_atr_pct: 0.0010
+
+sessions:
+  morning_or_start: "09:00"
+  morning_or_end: "09:15"
+  morning_entry_end: "13:30"
+  morning_profit_lock_time: "14:15"
+  # Evening COMEX session auto-adjusts via US DST resolver:
+  comex_or_start_edt: "17:00"
+  comex_or_end_edt: "17:30"
+  comex_entry_end_edt: "21:45"
+  eod_flatten_start_edt: "23:10"
+  comex_or_start_est: "18:00"
+  comex_or_end_est: "18:30"
+  comex_entry_end_est: "22:15"
+  eod_flatten_start_est: "23:35"
+
+gates:
+  min_days_to_expiry: 5
+  max_choppiness_index: 50.0
+  min_adx: 22.0
+  max_or_width_pct: 0.0065
+  breakout_atr_cushion: 0.15
+  min_clv: 0.70
+  min_rvol: 1.80
+  stop_atr_multiplier: 1.35
+  min_stop_width_pct: 0.0020
+  max_stop_width_pct: 0.0065
+
+ratchet:
+  target_r: 2.50
+  stage1_trigger_r: 1.00
+  stage1_lock_r: 0.15
+  stage2_trigger_r: 1.50
+  stage2_lock_r: 0.65
+  stage3_trigger_r: 2.00
+  stage3_lock_r: 1.25
+  stage4_step_r: 0.50
+  stage4_trail_offset_r: 0.65
+  max_stop_modifications: 20
+
+# Auxiliary Sections for Full Backward Compatibility
+entry:
+  order_type: "LIMIT"
+  exit_order_type: "LIMIT"
+  marketable_limit_buffer_pct: 0.15
+  max_slippage_pct: 0.15
+  unfilled_timeout_sec: 5
+  max_retries: 1
+
+schedule:
+  market_open: "09:00"
+  opening_range_end: "09:15"
+  entry_start: "09:15"
+  entry_cutoff: "22:15"
+  flatten_start: "23:10"
+  flat_target: "23:12"
+  market_close: "23:30"
+  hard_deadline: "23:25"
+  stale_threshold_sec: 15
+  holidays_2026:
+    - "2026-01-26"
+    - "2026-03-03"
+    - "2026-03-26"
+    - "2026-04-03"
+    - "2026-04-14"
+    - "2026-05-01"
+    - "2026-10-02"
+    - "2026-10-20"
+    - "2026-11-10"
+    - "2026-12-25"
+  special_sessions_2026:
+    "2026-11-08": "Diwali Muhurat Trading"
+
+costs:
+  brokerage_per_order: 20.0
+  ctt_pct: 0.05
+  exchange_txn_pct: 0.0026
+  gst_pct: 18.0
+  sebi_turnover_pct: 0.0001
+  stamp_duty_pct: 0.002
+
+journal:
+  db_path: "apex3_journal.db"
+  log_decisions: true
+  log_orders: true
+  log_fills: true
+  log_stop_changes: true
+  log_warnings: true
+  log_daily_summary: true
+
+dashboard:
+  host: "127.0.0.1"
+  port: 5000
+  auth_required: false
+  api_token: ""
+  refresh_interval_sec: 2
+
+rate_limits:
+  orders_per_second: 10
+  orders_per_minute: 200
+  quotes_per_second: 5
+  historical_per_second: 3
+  general_per_second: 10
