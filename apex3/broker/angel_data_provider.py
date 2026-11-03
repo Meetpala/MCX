@@ -645,9 +645,11 @@ class AngelDataProvider:
 
         return results
 
-    def get_instrument_info(self, symbol: str, exchange: str = "MCX") -> InstrumentInfo:
+    def get_instrument_info(self, symbol: str, exchange: Optional[str] = None) -> InstrumentInfo:
         """Fetch instrument info with verified circuit limits from exchange."""
         clean = symbol.replace("-EQ", "").upper()
+        if exchange is None:
+            exchange = "MCX" if clean.startswith(("SILVER", "GOLD")) else "NSE"
         token = self.resolve_token(clean, exchange)
         low_c, up_c = self._circuit_cache.get(clean, (0.0, 0.0))
         tick = 1.0 if exchange == "MCX" else 0.05

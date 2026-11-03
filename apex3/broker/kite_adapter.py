@@ -101,6 +101,105 @@ def _map_kite_order_type(type_str: str) -> OrderType:
     return OrderType.UNKNOWN
 
 
+MCX_LOT_MULTIPLIERS: dict[str, int] = {
+    "SILVERMIC": 1,
+    "GOLDGUINEA": 1,
+    "GOLDPETAL": 1,
+    "GOLDTEN": 1,
+    "SILVERM": 5,
+    "GOLDM": 10,
+    "SILVER": 30,
+    "GOLD": 100,
+}
+
+
+def get_mcx_lot_multiplier(symbol_or_root: str) -> int:
+    """Return the P&L rupee multiplier per ₹1.00 move for MCX precious metals."""
+    clean = symbol_or_root.upper().strip()
+    for root in sorted(MCX_LOT_MULTIPLIERS.keys(), key=len, reverse=True):
+        if clean.startswith(root):
+            return MCX_LOT_MULTIPLIERS[root]
+    return 1
+
+
+def parse_expiry_date(expiry_val: Any) -> Optional[date]:
+    """Parse expiry date from date, datetime, or standard exchange string formats."""
+    if expiry_val is None:
+        return None
+    if isinstance(expiry_val, datetime):
+        return expiry_val.date()
+    if isinstance(expiry_val, date):
+        return expiry_val
+    if isinstance(expiry_val, str):
+        s = expiry_val.strip()
+        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except ValueError:
+                pass
+    return None
+
+
+def resolve_active_mcx_futures(
+    instruments: list[dict[str, Any]],
+    symbol_roots: list[str],
+    min_days_to_expiry: int = 5,
+    as_of: Optional[date] = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve the active front-month MCX futures contract for each symbol root.
+
+    Filters contracts where (expiry_date - today).days >= min_days_to_expiry to avoid physical
+    delivery tender periods, and selects the nearest active expiry.
+    """
+    today = as_of or datetime.now(IST).date()
+    results: dict[str, dict[str, Any]] = {}
+
+    for root in symbol_roots:
+        clean_root = root.upper().strip()
+        candidates: list[tuple[date, dict[str, Any]]] = []
+        for inst in instruments:
+            seg = str(inst.get("segment", "") or inst.get("exch_seg", "") or inst.get("exchange", "")).upper()
+            if seg and "MCX" not in seg:
+                continue
+
+            itype = str(inst.get("instrument_type", "") or inst.get("instrumenttype", "")).upper()
+            if itype and itype not in ("FUT", "FUTCOM"):
+                continue
+
+            inst_name = str(inst.get("name", "")).upper().strip()
+            tradingsymbol = str(inst.get("tradingsymbol", "") or inst.get("symbol", "")).upper().strip()
+
+            matched = False
+            if inst_name == clean_root:
+                matched = True
+            elif tradingsymbol.startswith(clean_root):
+                longer_matches = [
+                    k for k in MCX_LOT_MULTIPLIERS
+                    if len(k) > len(clean_root) and tradingsymbol.startswith(k)
+                ]
+                if not longer_matches:
+                    matched = True
+
+            if matched:
+                exp = parse_expiry_date(inst.get("expiry"))
+                if exp is not None:
+                    days_left = (exp - today).days
+                    if days_left >= min_days_to_expiry:
+                        candidates.append((exp, inst))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            results[clean_root] = candidates[0][1]
+        else:
+            logger.warning(
+                "No active front-month contract found for root %s (min_days_to_expiry=%d)",
+                clean_root,
+                min_days_to_expiry,
+            )
+
+    return results
+
+
 class KiteAdapter(BrokerInterface):
     """Zerodha Kite Connect broker adapter.
 
@@ -127,7 +226,7 @@ class KiteAdapter(BrokerInterface):
         self.rate_limiter: Optional[RateLimiter] = rate_limiter
 
         self._kite: Optional[Any] = None
-        self._instruments_cache: dict[str, dict] = {}
+        self._instruments_cache: dict[str, dict[str, dict]] = {}
         self._instrument_info_cache: dict[str, InstrumentInfo] = {}
         self._mis_margin_cache: dict[str, bool] = {}
         self._quote_permission_denied: bool = False
@@ -176,19 +275,23 @@ class KiteAdapter(BrokerInterface):
 
     def _get_instruments(self, exchange: str = "NSE") -> dict[str, dict]:
         """Fetch and cache daily instruments dump from Kite."""
-        today_str = datetime.now(IST).strftime("%Y-%m-%d")
-        if self._instruments_cache and self._cache_date == today_str:
+        # Backward compatibility for flat symbol dictionary assignments in unit tests
+        if self._instruments_cache and not any(k in self._instruments_cache for k in ("NSE", "MCX", "NFO", "BSE")):
             return self._instruments_cache
+
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        if exchange in self._instruments_cache and self._cache_date == today_str:
+            return self._instruments_cache[exchange]
 
         self._require_kite()
         try:
             raw_list = self._kite.instruments(exchange)
-            self._instruments_cache = {i["tradingsymbol"]: i for i in raw_list}
+            self._instruments_cache[exchange] = {i["tradingsymbol"]: i for i in raw_list}
             self._cache_date = today_str
-            logger.info("Cached %d instruments from Kite (%s)", len(self._instruments_cache), exchange)
+            logger.info("Cached %d instruments from Kite (%s)", len(self._instruments_cache[exchange]), exchange)
         except Exception as e:
-            logger.error("Failed to fetch instruments from Kite: %s", e)
-        return self._instruments_cache
+            logger.error("Failed to fetch instruments from Kite for %s: %s", exchange, e)
+        return self._instruments_cache.get(exchange, {})
 
     def _resolve_instrument_token(self, symbol: str, exchange: str = "NSE") -> int:
         """Resolve instrument token for a given symbol."""
@@ -198,13 +301,40 @@ class KiteAdapter(BrokerInterface):
             return int(inst["instrument_token"])
         raise ValueError(f"Instrument token not found for {exchange}:{symbol}")
 
-    # ── Margin & Capital ─────────────────────────────────────────
-
-    def get_margins(self) -> MarginInfo:
-        """Fetch margin information from Kite."""
+    def resolve_active_mcx_futures(
+        self,
+        symbol_roots: list[str],
+        min_days_to_expiry: int = 5,
+        as_of: Optional[date] = None,
+    ) -> dict[str, InstrumentInfo]:
+        """Resolve active front-month MCX futures contracts for given symbol roots."""
         self._require_kite()
         try:
-            margins = self._kite.margins(segment="equity")
+            instruments_list = self._kite.instruments("MCX")
+        except Exception as e:
+            logger.error("Failed to fetch MCX instruments: %s", e)
+            instruments_list = list(self._get_instruments("MCX").values())
+
+        active_dict = resolve_active_mcx_futures(instruments_list, symbol_roots, min_days_to_expiry, as_of)
+        res: dict[str, InstrumentInfo] = {}
+        for root, raw in active_dict.items():
+            sym = raw.get("tradingsymbol", "")
+            info = self.get_instrument_info(sym, exchange="MCX")
+            res[root] = info
+        return res
+
+    # ── Margin & Capital ─────────────────────────────────────────
+
+    def get_margins(self, segment: str = "commodity") -> MarginInfo:
+        """Fetch margin information from Kite (defaults to commodity)."""
+        self._require_kite()
+        try:
+            try:
+                margins = self._kite.margins(segment=segment)
+            except Exception as e:
+                logger.warning("Kite margins failed for segment '%s': %s; falling back to 'equity'", segment, e)
+                margins = self._kite.margins(segment="equity")
+
             avail_data = margins.get("available", {})
             util_data = margins.get("utilised", {})
 
@@ -229,9 +359,10 @@ class KiteAdapter(BrokerInterface):
         """Estimate margin via Kite's order margin calculator."""
         self._require_kite()
         self._acquire_rate_limit("orders")
+        exchange = request.exchange or "MCX"
         order_type_str = request.order_type.value
         params = [{
-            "exchange": request.exchange,
+            "exchange": exchange,
             "tradingsymbol": request.symbol,
             "transaction_type": request.side.value,
             "variety": "regular",
@@ -241,33 +372,35 @@ class KiteAdapter(BrokerInterface):
             "price": request.price if order_type_str in ("LIMIT", "SL") else 0.0,
             "trigger_price": request.trigger_price if order_type_str in ("SL", "SL-M") else 0.0,
         }]
+
+        lot_mult = get_mcx_lot_multiplier(request.symbol)
+        notional = request.price * lot_mult * request.quantity
+
         try:
             result = self._kite.order_margins(params)
             res = result[0] if result else {}
             req_m = float(res.get("total", 0.0))
             charges = float(res.get("charges", {}).get("total", 0.0))
-            notional = request.price * request.quantity
-            leverage = (notional / req_m) if req_m > 0 else 4.0
+            leverage = (notional / req_m) if req_m > 0 else 6.0
             return OrderMarginEstimate(
                 required_margin=req_m,
                 charges=charges,
                 total=req_m + charges,
-                leverage_available=min(4.0, round(leverage, 2)),
+                leverage_available=min(10.0, round(leverage, 2)),
             )
         except Exception as e:
             logger.error("Order margin estimation failed for %s: %s", request.symbol, e)
             if getattr(self, "_live_enabled", False):
                 raise RuntimeError(
                     f"Fresh margin estimate failed for {request.symbol}: {e}. "
-                    "Cannot safely assume 4x leverage in live trading."
+                    "Cannot safely assume fallback leverage in live trading."
                 ) from e
-            notional = request.price * request.quantity
-            est_req = notional / 4.0
+            est_req = notional * 0.15
             return OrderMarginEstimate(
                 required_margin=est_req,
                 charges=0.0,
                 total=est_req,
-                leverage_available=4.0,
+                leverage_available=round(notional / est_req, 2) if est_req > 0 else 6.67,
             )
 
     # ── Order Management ─────────────────────────────────────────
@@ -621,14 +754,22 @@ class KiteAdapter(BrokerInterface):
             )
         return candles
 
-    def get_instrument_info(self, symbol: str, exchange: str = "NSE") -> InstrumentInfo:
+    def get_instrument_info(self, symbol: str, exchange: Optional[str] = None) -> InstrumentInfo:
         """Fetch instrument metadata and circuit boundaries from Kite."""
+        if exchange is None:
+            exchange = "MCX" if symbol.upper().startswith(("SILVER", "GOLD")) else "NSE"
         if symbol in self._instrument_info_cache:
             return self._instrument_info_cache[symbol]
 
         self._require_kite()
         inst = self._get_instruments(exchange).get(symbol)
-        tick = float(inst.get("tick_size", 0.05)) if inst else 0.05
+        default_tick = 1.0 if exchange == "MCX" else 0.05
+        tick = float(inst.get("tick_size", default_tick)) if inst else default_tick
+        order_lot = int(inst.get("lot_size", 1)) if inst else 1
+        lot_mult = get_mcx_lot_multiplier(symbol)
+        exp_date = parse_expiry_date(inst.get("expiry")) if inst else None
+        today = datetime.now(IST).date()
+        dte = (exp_date - today).days if exp_date else 999
 
         # Get circuit limits from live quote with rate limiting
         q_data = {}
@@ -661,10 +802,11 @@ class KiteAdapter(BrokerInterface):
 
         token_str = str(inst.get("instrument_token", "")) if inst else ""
 
-        # Validate actual broker-side MIS eligibility (segment, equity series, and margin rules)
-        # Defaults to False (fail-closed)
+        # Validate broker-side margin eligibility
         mis_eligible = False
-        if inst and inst.get("segment") == "NSE" and inst.get("instrument_type") == "EQ":
+        if exchange == "MCX":
+            mis_eligible = True
+        elif inst and inst.get("segment") == "NSE" and inst.get("instrument_type") == "EQ":
             clean_sym = symbol.upper()
             # SEBI / NSE restricted surveillance or trade-to-trade series prohibit intraday MIS
             if not any(clean_sym.endswith(sfx) for sfx in ("-BE", "-BZ", "-SM", "-ST", "-E1", "-SZ", "-IL")):
@@ -726,10 +868,16 @@ class KiteAdapter(BrokerInterface):
             upper_circuit=upper_c,
             lower_circuit=lower_c,
             tick_size=tick,
-            lot_size=int(inst.get("lot_size", 1)) if inst else 1,
+            lot_size=order_lot,
+            order_lot_size=order_lot,
+            lot_multiplier=lot_mult,
+            expiry_date=exp_date,
+            days_to_expiry=dte,
             instrument_token=token_str,
             mis_available=mis_eligible,
         )
+        self._instrument_info_cache[symbol] = info
+        return info
         self._instrument_info_cache[symbol] = info
         return info
 

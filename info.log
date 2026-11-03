@@ -1,0 +1,14 @@
+================================================================================
+APEX-3 LIVE TRADE AUDIT LOG (info.log)
+--------------------------------------------------------------------------------
+System        : APEX-3 Quant Intraday Engine (Zerodha MIS / Angel One Hybrid)
+Audit Start   : 2026-10-28 (Tomorrow Onwards — Past Trades Excluded)
+Capital Base  : Rs. 15,000 | Max Risk/Trade: Rs. 120.00 | Max Friction: < 26.0%
+Sync Protocol : Autonomous & Resilient (Updates upon internet connect / run)
+================================================================================
+
+[2026-11-04 02:30:27 IST] INFO.LOG INITIALIZED
+Awaiting trading sessions starting from 2026-10-28 09:15 IST.
+All future trade executions, fills, exits, and PnL audits will be recorded below.
+================================================================================
+

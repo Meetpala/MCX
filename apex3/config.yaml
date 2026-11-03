@@ -79,6 +79,71 @@ ratchet:
   max_stop_modifications: 20
 
 # Auxiliary Sections for Full Backward Compatibility
+account:
+  starting_capital: 15000.00
+  max_intraday_leverage: 4.0
+  safety_reserve_buffer_pct: 0.05
+  fetch_live_zerodha_margin: true
+
+regime_filter:
+  benchmark_symbol: "NIFTY 50"
+  benchmark_exchange: "NSE"
+
+risk_management:
+  max_concurrent_positions: 2
+  max_new_entries_per_bar: 1
+  second_slot_requires_slot1_profit_r: 0.0
+  risk_per_trade_pct: 0.0080
+  daily_loss_limit_pct: 0.0160
+  slippage_allowance_pct: 0.0
+  bound_loss_with_charges: true
+
+radar:
+  core_conviction_multiplier: 1.15
+  probation_volume_surge_ratio: 2.50
+  probation_min_clv_ratio: 0.65
+  core_watchlist:
+    - "HINDALCO"
+    - "TATASTEEL"
+    - "JSWSTEEL"
+    - "JINDALSTEL"
+    - "RELIANCE"
+    - "ICICIBANK"
+    - "INFY"
+    - "SBIN"
+    - "BHARTIARTL"
+    - "LT"
+    - "AXISBANK"
+    - "KOTAKBANK"
+  enable_extended_radar: true
+  extended_radar:
+    - "TRENT"
+    - "BEL"
+    - "HAL"
+    - "DIXON"
+    - "POLYCAB"
+    - "PERSISTENT"
+    - "COFORGE"
+    - "TITAN"
+  custom_user_radar: []
+
+stops_and_targets:
+  initial_stop_atr_multiplier: 1.35
+  max_stop_loss_pct: 0.0090
+  min_stop_loss_pct: 0.0055
+  use_fixed_target: true
+  target_r_multiple: 2.0
+  trail_enabled: false
+  fee_lock_enabled: true
+  fee_lock_trigger_r: 1.60
+  fee_lock_profit_r: 0.60
+  fee_lock_offset_pct: 0.0015
+  late_day_lock_trigger_r: 1.15
+  late_day_lock_profit_r: 0.35
+  late_day_protection_time: "14:15"
+  max_modifications_per_order: 25
+  modification_headroom: 3
+
 entry:
   order_type: "LIMIT"
   exit_order_type: "LIMIT"
@@ -88,16 +153,17 @@ entry:
   max_retries: 1
 
 schedule:
-  market_open: "09:00"
-  opening_range_end: "09:15"
-  entry_start: "09:15"
-  entry_cutoff: "22:15"
-  flatten_start: "23:10"
-  flat_target: "23:12"
-  market_close: "23:30"
-  hard_deadline: "23:25"
+  market_open: "09:15"
+  opening_range_end: "09:30"
+  entry_start: "09:35"
+  entry_cutoff: "14:45"
+  flatten_start: "15:15"
+  flat_target: "15:20"
+  market_close: "15:30"
+  hard_deadline: "15:25"
   stale_threshold_sec: 15
   holidays_2026:
+    - "2026-01-15"
     - "2026-01-26"
     - "2026-03-03"
     - "2026-03-26"

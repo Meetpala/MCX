@@ -115,9 +115,34 @@ def calculate_zerodha_intraday_charges(
     sell_price: float,
     quantity: int,
     lot_multiplier: int = 1,
+    exchange: str = "NSE",
 ) -> float:
-    """Convenience alias for MCX / Zerodha intraday statutory fee calculator."""
-    return calculate_mcx_intraday_charges(buy_price, sell_price, quantity, lot_multiplier)
+    """Exact NSE / MCX Zerodha intraday statutory fee calculator.
+
+    If exchange is MCX or lot_multiplier > 1, computes MCX commodity charges.
+    Otherwise, computes standard NSE intraday equity MIS charges.
+    """
+    if quantity <= 0 or buy_price <= 0 or sell_price <= 0:
+        return 0.0
+
+    if exchange.upper() == "MCX" or lot_multiplier > 1:
+        return calculate_mcx_intraday_charges(buy_price, sell_price, quantity, lot_multiplier)
+
+    buy_turnover = buy_price * quantity
+    sell_turnover = sell_price * quantity
+    total_turnover = buy_turnover + sell_turnover
+
+    brok_buy = min(20.0, buy_turnover * 0.0003)
+    brok_sell = min(20.0, sell_turnover * 0.0003)
+    brokerage = brok_buy + brok_sell
+
+    stt = sell_turnover * 0.00025
+    nse_charges = total_turnover * 0.0000318
+    sebi_charges = total_turnover * 0.000001
+    stamp_duty = buy_turnover * 0.00003
+    gst = 0.18 * (brokerage + nse_charges + sebi_charges)
+
+    return round(brokerage + stt + nse_charges + sebi_charges + stamp_duty + gst, 2)
 
 
 def size_position(
@@ -329,10 +354,13 @@ def size_position(
     q_raw = min(q_notional, q_risk, q_margin)
     q_final = (q_raw // lot_size) * lot_size
 
-    # Hard Risk Bound: Ensure total realized loss at stop-loss (including Zerodha MCX statutory friction) <= trade_risk_rupees
+    # Hard Risk Bound: Ensure total realized loss at stop-loss (including statutory friction) <= trade_risk_rupees
+    is_mcx = symbol.upper().startswith(("SILVER", "GOLD")) or lot_multiplier > 1
+    fee_calc = calculate_mcx_intraday_charges if is_mcx else (lambda bp, sp, q, lm: calculate_zerodha_intraday_charges(bp, sp, q, lm, exchange="NSE"))
+
     if q_final > 0 and getattr(risk_config, "bound_loss_with_charges", True):
         while q_final > 0:
-            stop_exit_charges = calculate_mcx_intraday_charges(entry_price, stop_price, q_final, lot_multiplier)
+            stop_exit_charges = fee_calc(entry_price, stop_price, q_final, lot_multiplier)
             total_realized_loss = (q_final * per_lot_risk) + stop_exit_charges
             if total_realized_loss <= trade_risk_rupees:
                 break
@@ -365,9 +393,9 @@ def size_position(
             rejection_reason=f"Total stop-loss risk with statutory charges exceeds ₹{trade_risk_rupees:.2f}",
         )
 
-    # Gate: Reject trade if MCX charges consume > 18% of expected 2.0R gross profit
+    # Gate: Reject trade if charges consume > 18% of expected 2.0R gross profit
     target_price = round(entry_price + (2.0 * per_point_loss) if side == Side.BUY else entry_price - (2.0 * per_point_loss), 2)
-    est_charges = calculate_mcx_intraday_charges(entry_price, target_price, q_final, lot_multiplier)
+    est_charges = fee_calc(entry_price, target_price, q_final, lot_multiplier)
     expected_2r_gross_profit = 2.0 * gross_risk_per_lot * q_final
 
     max_fee_ratio = getattr(risk_config, "max_fee_to_profit_ratio", 0.18)
@@ -505,7 +533,7 @@ def calculate_position_size(
     margin_req = round(notional / leverage, 2)
     planned_risk = round(quantity * risk_per_share, 2)
 
-    est_charges = calculate_mcx_intraday_charges(entry_price, target_price, quantity)
+    est_charges = calculate_zerodha_intraday_charges(entry_price, target_price, quantity, exchange="NSE")
     expected_gross_win = abs(target_price - entry_price) * quantity
 
     # Reject trade if Zerodha charges consume > 18% of expected 2.0R gross profit
