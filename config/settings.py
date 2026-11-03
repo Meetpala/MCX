@@ -20,7 +20,13 @@ load_dotenv()
 IST = zoneinfo.ZoneInfo("Asia/Kolkata")
 UTC = zoneinfo.ZoneInfo("UTC")
 
-# Zerodha Kite Connect Credentials
+# Angel One SmartAPI Credentials (FREE Market Data & Quotes Feed)
+ANGEL_API_KEY: str = os.getenv("ANGEL_API_KEY", "")
+ANGEL_CLIENT_CODE: str = os.getenv("ANGEL_CLIENT_CODE", "")
+ANGEL_PIN: str = os.getenv("ANGEL_PIN", "")
+ANGEL_TOTP_SECRET: str = os.getenv("ANGEL_TOTP_SECRET", "")
+
+# Zerodha Kite Connect Credentials (ORDER EXECUTION, POSITIONS & MARGINS ONLY)
 KITE_API_KEY: str = os.getenv("KITE_API_KEY", "")
 KITE_ACCESS_TOKEN: str = os.getenv("KITE_ACCESS_TOKEN", "")
 

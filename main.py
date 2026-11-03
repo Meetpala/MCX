@@ -23,6 +23,10 @@ import time as time_module
 from typing import Dict, Optional
 
 from config.settings import (
+    ANGEL_API_KEY,
+    ANGEL_CLIENT_CODE,
+    ANGEL_PIN,
+    ANGEL_TOTP_SECRET,
     CAPITAL_RISK_PER_TRADE,
     DAILY_LOSS_LIMIT_PCT,
     DEFAULT_COMMODITY,
@@ -40,6 +44,7 @@ from config.settings import (
     get_mcx_schedule,
     is_entry_allowed,
 )
+from apex3.broker.angel_data_provider import AngelDataProvider
 from core.margin_and_sizer import LiveMarginManager, SizingResult, calculate_net_pnl
 from core.order_state_machine import OrderStateMachine, Position, PositionStatus
 from core.regime_and_strategy import Candle, MarketRegime, StrategyEngine, TradeSignal
@@ -82,23 +87,44 @@ class MCXTradingBot:
         self.consecutive_stopouts = 0
         self.execution_state = SystemExecutionState.RUNNING
 
-        # Initialize Kite Connect Client (if not in paper mode)
+        # 1. Market Data Layer (Angel One SmartAPI - Strictly Free Read-Only)
+        self.angel_data: Optional[AngelDataProvider] = None
+        if ANGEL_API_KEY and ANGEL_CLIENT_CODE:
+            try:
+                self.angel_data = AngelDataProvider(
+                    api_key=ANGEL_API_KEY,
+                    client_code=ANGEL_CLIENT_CODE,
+                    pin=ANGEL_PIN,
+                    totp_secret=ANGEL_TOTP_SECRET,
+                )
+                if self.angel_data.is_session_valid():
+                    logger.info("Angel One SmartAPI market data feed ACTIVE and authenticated.")
+                else:
+                    logger.warning("Angel One session authentication pending or awaiting credentials.")
+            except Exception as e:
+                logger.warning(f"Could not initialize AngelDataProvider: {e}")
+
+        # 2. Execution & Margin Layer (Zerodha Kite Connect - Strictly Orders & Margins)
         self.kite = None
-        self.kws = None
         if not is_paper:
             try:
-                from kiteconnect import KiteConnect, KiteTicker
+                from kiteconnect import KiteConnect
                 if KITE_API_KEY and KITE_ACCESS_TOKEN:
                     self.kite = KiteConnect(api_key=KITE_API_KEY)
                     self.kite.set_access_token(KITE_ACCESS_TOKEN)
-                    self.kws = KiteTicker(api_key=KITE_API_KEY, access_token=KITE_ACCESS_TOKEN)
-                    logger.info("Successfully initialized Zerodha Kite Connect live client.")
+                    logger.info("Successfully initialized Zerodha Kite Connect LIVE execution client.")
                 else:
-                    logger.warning("Kite API credentials not set. Falling back to PAPER trading mode.")
+                    logger.warning("Kite API credentials not set. Falling back to PAPER execution mode.")
                     self.is_paper = True
             except ImportError:
                 logger.error("kiteconnect package not found. Running in simulation/paper mode.")
                 self.is_paper = True
+
+        logger.info(
+            "SPLIT-FEED HYBRID ARCHITECTURE INITIALIZED: "
+            "[Market Data: Angel One SmartAPI (Free Quotes/Ticks)] -> "
+            "[Order Execution: Zerodha Kite Connect (Free MIS/NRML Execution)]"
+        )
 
         # Core Engines
         spec = MCX_INSTRUMENTS.get(self.symbol, MCX_INSTRUMENTS["GOLDM"])
@@ -137,6 +163,26 @@ class MCXTradingBot:
         sched_thread = threading.Thread(target=self._run_scheduler_loop, daemon=True)
         sched_thread.start()
         self.threads.append(sched_thread)
+
+        # Launch Angel One Market Data streaming/polling thread (Market Data Layer)
+        if self.angel_data:
+            data_thread = threading.Thread(target=self._run_angel_market_data_loop, daemon=True)
+            data_thread.start()
+            self.threads.append(data_thread)
+            logger.info("Angel One live market data poller launched.")
+
+    def _run_angel_market_data_loop(self):
+        """Continuously pulls live market data/quotes exclusively from Angel One SmartAPI."""
+        logger.info(f"Angel One market data stream loop started for {self.symbol} (MCX)")
+        while not self.shutdown_requested:
+            try:
+                # Strictly read-only market data from Angel One SmartAPI
+                q = self.angel_data.get_quote(self.symbol, exchange="MCX")
+                if q and q.last_price > 0:
+                    self.on_tick_received(q.timestamp or datetime.now(IST), q.last_price, q.volume or 1.0)
+            except Exception as e:
+                logger.error(f"Error in Angel One market data loop: {e}")
+            time_module.sleep(1.0)
 
     def on_tick_received(self, timestamp: datetime, ltp: float, volume: float = 1.0):
         """
