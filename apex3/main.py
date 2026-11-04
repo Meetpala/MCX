@@ -84,6 +84,8 @@ def run_app():
     parser = argparse.ArgumentParser(description="APEX-3 Zerodha Intraday System")
     parser.add_argument("--config", type=str, default=None, help="Path to custom config.yaml")
     parser.add_argument("--mode", type=str, default=None, choices=["paper", "live"], help="Operating mode (paper or live)")
+    parser.add_argument("--live", action="store_true", help="Run in live trading mode")
+    parser.add_argument("--paper", action="store_true", help="Run in paper trading mode")
     parser.add_argument("--simulate", action="store_true", help="Run a simulated trading day and print report")
     parser.add_argument("--sync-trades", action="store_true", help="Sync broker trades to info.log and exit")
     parser.add_argument("--host", type=str, default=None, help="Dashboard host interface (e.g. 127.0.0.1)")
@@ -91,7 +93,11 @@ def run_app():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    if args.mode:
+    if args.live:
+        config.mode = "live"
+    elif args.paper:
+        config.mode = "paper"
+    elif args.mode:
         config.mode = args.mode
     logger.info("Initializing APEX-3 version 0.1.0 (Mode: %s)...", config.mode.upper())
     notifier = AlertNotifier()

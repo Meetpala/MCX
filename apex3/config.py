@@ -73,22 +73,30 @@ class GatesConfig:
 
 @dataclass(frozen=True)
 class RatchetConfig:
-    target_r: float = 2.50
+    target_r: float = 3.50
+    stage0_breathing_r: float = 1.00
     stage1_trigger_r: float = 1.00
-    stage1_lock_r: float = 0.15
-    stage2_trigger_r: float = 1.50
+    stage1_lock_r: float = 0.18
+    stage2_trigger_r: float = 1.40
     stage2_lock_r: float = 0.65
+    stage2b_trigger_r: float = 1.75
+    stage2b_lock_r: float = 0.95
     stage3_trigger_r: float = 2.00
+    stage3_step_r: float = 0.35
     stage3_lock_r: float = 1.25
+    stage3_trail_offset_r: float = 0.65
+    stage4_trigger_r: float = 3.20
     stage4_step_r: float = 0.50
-    stage4_trail_offset_r: float = 0.65
+    stage4_trail_offset_r: float = 0.35
     max_stop_modifications: int = 20
+    min_step_ticks: int = 3
+    min_step_r: float = 0.12
     # MCX aliases
     stage1_r: float = 1.00
-    stage1_buffer_ticks: int = 2
-    stage2_r: float = 1.50
+    stage1_buffer_ticks: int = 3
+    stage2_r: float = 1.40
     stage3_r: float = 2.00
-    stage4_r: float = 2.50
+    stage4_r: float = 3.20
 
 
 @dataclass(frozen=True)
@@ -524,16 +532,24 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 
     ratchet_raw = raw.get("ratchet", {})
     ratchet_config = RatchetConfig(
-        target_r=float(ratchet_raw.get("target_r", 2.50)),
+        target_r=float(ratchet_raw.get("target_r", 3.50)),
+        stage0_breathing_r=float(ratchet_raw.get("stage0_breathing_r", 1.00)),
         stage1_trigger_r=float(ratchet_raw.get("stage1_trigger_r", 1.00)),
-        stage1_lock_r=float(ratchet_raw.get("stage1_lock_r", 0.15)),
-        stage2_trigger_r=float(ratchet_raw.get("stage2_trigger_r", 1.50)),
+        stage1_lock_r=float(ratchet_raw.get("stage1_lock_r", 0.18)),
+        stage2_trigger_r=float(ratchet_raw.get("stage2_trigger_r", 1.40)),
         stage2_lock_r=float(ratchet_raw.get("stage2_lock_r", 0.65)),
+        stage2b_trigger_r=float(ratchet_raw.get("stage2b_trigger_r", 1.75)),
+        stage2b_lock_r=float(ratchet_raw.get("stage2b_lock_r", 0.95)),
         stage3_trigger_r=float(ratchet_raw.get("stage3_trigger_r", 2.00)),
+        stage3_step_r=float(ratchet_raw.get("stage3_step_r", 0.35)),
         stage3_lock_r=float(ratchet_raw.get("stage3_lock_r", 1.25)),
+        stage3_trail_offset_r=float(ratchet_raw.get("stage3_trail_offset_r", 0.65)),
+        stage4_trigger_r=float(ratchet_raw.get("stage4_trigger_r", 3.20)),
         stage4_step_r=float(ratchet_raw.get("stage4_step_r", 0.50)),
-        stage4_trail_offset_r=float(ratchet_raw.get("stage4_trail_offset_r", 0.65)),
+        stage4_trail_offset_r=float(ratchet_raw.get("stage4_trail_offset_r", 0.35)),
         max_stop_modifications=int(ratchet_raw.get("max_stop_modifications", 20)),
+        min_step_ticks=int(ratchet_raw.get("min_step_ticks", 3)),
+        min_step_r=float(ratchet_raw.get("min_step_r", 0.12)),
     )
 
     # Build merged watchlist from radar tiers or universe core watchlist
@@ -576,7 +592,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         circuit_dist *= 100.0
 
     return AppConfig(
-        mode=str(raw.get("mode", "paper")),
+        mode=str(os.environ.get("TRADING_MODE") or os.environ.get("APEX3_MODE") or raw.get("mode", "paper")).lower().strip(),
         paper_starting_capital=float(acc_raw.get("starting_capital", raw.get("paper_starting_capital", base_cap))),
         exchange=exchange,
         margin_segment=margin_segment,

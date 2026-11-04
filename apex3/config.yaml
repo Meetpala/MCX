@@ -27,6 +27,11 @@ universe:
       tick_size: 1.0
       max_spread_bps: 5.0
       min_atr_pct: 0.0010
+    - symbol_root: "GOLDTEN"
+      lot_multiplier: 1
+      tick_size: 1.0
+      max_spread_bps: 4.0
+      min_atr_pct: 0.0010
   scale_up_watchlist:               # Enabled automatically when live_balance >= ₹1,50,000
     - symbol_root: "SILVERM"
       lot_multiplier: 5
@@ -37,6 +42,16 @@ universe:
       lot_multiplier: 10
       tick_size: 1.0
       max_spread_bps: 3.0
+      min_atr_pct: 0.0010
+    - symbol_root: "SILVER"
+      lot_multiplier: 30
+      tick_size: 1.0
+      max_spread_bps: 2.5
+      min_atr_pct: 0.0014
+    - symbol_root: "GOLD"
+      lot_multiplier: 100
+      tick_size: 1.0
+      max_spread_bps: 2.5
       min_atr_pct: 0.0010
 
 sessions:
@@ -68,15 +83,23 @@ gates:
 
 ratchet:
   target_r: 2.50
+  stage0_breathing_r: 1.00
   stage1_trigger_r: 1.00
   stage1_lock_r: 0.15
   stage2_trigger_r: 1.50
   stage2_lock_r: 0.65
+  stage2b_trigger_r: 1.75
+  stage2b_lock_r: 0.95
   stage3_trigger_r: 2.00
+  stage3_step_r: 0.35
   stage3_lock_r: 1.25
+  stage3_trail_offset_r: 0.65
+  stage4_trigger_r: 3.20
   stage4_step_r: 0.50
   stage4_trail_offset_r: 0.65
   max_stop_modifications: 20
+  min_step_ticks: 3
+  min_step_r: 0.12
 
 # Auxiliary Sections for Full Backward Compatibility
 account:

@@ -66,6 +66,10 @@ class ManagedPosition:
     last_reconciled: Optional[datetime] = None
     catalyst_aligned: bool = False
     macro_score_at_entry: float = 0.0
+    hwm_price: float = 0.0
+    hwm_r: float = 0.0
+    ratchet_stage: int = 0
+    playbook: str = "TREND"
 
     def to_position_state(self) -> PositionState:
         """Convert to public PositionState model."""
@@ -98,6 +102,10 @@ class ManagedPosition:
             entry_time=self.entry_timestamp,
             catalyst_aligned=self.catalyst_aligned,
             macro_score_at_entry=self.macro_score_at_entry,
+            hwm_price=self.hwm_price if self.hwm_price > 0 else self.best_favorable_price,
+            hwm_r=self.hwm_r,
+            ratchet_stage=self.ratchet_stage,
+            playbook=self.playbook,
         )
 
 

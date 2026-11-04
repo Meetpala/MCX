@@ -132,11 +132,20 @@ def parse_expiry_date(expiry_val: Any) -> Optional[date]:
         return expiry_val
     if isinstance(expiry_val, str):
         s = expiry_val.strip()
-        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
+        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S", "%d%b%y"):
             try:
                 return datetime.strptime(s, fmt).date()
             except ValueError:
                 pass
+        import re
+        m = re.search(r"(\d{1,2}[A-Za-z]{3}\d{2,4})", s)
+        if m:
+            sub = m.group(1).upper()
+            for fmt in ("%d%b%y", "%d%b%Y"):
+                try:
+                    return datetime.strptime(sub, fmt).date()
+                except ValueError:
+                    pass
     return None
 
 
@@ -168,6 +177,11 @@ def resolve_active_mcx_futures(
 
             inst_name = str(inst.get("name", "")).upper().strip()
             tradingsymbol = str(inst.get("tradingsymbol", "") or inst.get("symbol", "")).upper().strip()
+
+            if tradingsymbol.endswith("CE") or tradingsymbol.endswith("PE"):
+                continue
+            if not tradingsymbol.endswith("FUT") and itype not in ("FUT", "FUTCOM"):
+                continue
 
             matched = False
             if inst_name == clean_root:
@@ -320,6 +334,23 @@ class KiteAdapter(BrokerInterface):
         for root, raw in active_dict.items():
             sym = raw.get("tradingsymbol", "")
             info = self.get_instrument_info(sym, exchange="MCX")
+            if not info.symbol_root:
+                info = InstrumentInfo(
+                    symbol=info.symbol,
+                    exchange=info.exchange,
+                    symbol_root=root,
+                    tick_size=info.tick_size,
+                    lot_size=info.lot_size,
+                    order_lot_size=info.order_lot_size,
+                    lot_multiplier=info.lot_multiplier,
+                    expiry_date=info.expiry_date,
+                    days_to_expiry=info.days_to_expiry,
+                    exchange_token=info.exchange_token,
+                    instrument_token=info.instrument_token,
+                    upper_circuit=info.upper_circuit,
+                    lower_circuit=info.lower_circuit,
+                    mis_available=info.mis_available,
+                )
             res[root] = info
         return res
 
@@ -360,6 +391,8 @@ class KiteAdapter(BrokerInterface):
         self._require_kite()
         self._acquire_rate_limit("orders")
         exchange = request.exchange or "MCX"
+        if exchange == "NSE" and any(k in request.symbol for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")):
+            exchange = "MCX"
         order_type_str = request.order_type.value
         params = [{
             "exchange": exchange,
@@ -426,9 +459,13 @@ class KiteAdapter(BrokerInterface):
             trigger_price,
         )
 
+        exchange = request.exchange or "MCX"
+        if exchange == "NSE" and any(k in request.symbol for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")):
+            exchange = "MCX"
+
         order_id = self._kite.place_order(
             variety="regular",
-            exchange=request.exchange,
+            exchange=exchange,
             tradingsymbol=request.symbol,
             transaction_type=request.side.value,
             quantity=request.quantity,
@@ -862,9 +899,16 @@ class KiteAdapter(BrokerInterface):
                 else:
                     mis_eligible = True
 
+        sym_root = ""
+        for r in sorted(MCX_LOT_MULTIPLIERS.keys(), key=len, reverse=True):
+            if symbol.upper().startswith(r):
+                sym_root = r
+                break
+
         info = InstrumentInfo(
             symbol=symbol,
             exchange=exchange,
+            symbol_root=sym_root,
             upper_circuit=upper_c,
             lower_circuit=lower_c,
             tick_size=tick,
@@ -876,8 +920,6 @@ class KiteAdapter(BrokerInterface):
             instrument_token=token_str,
             mis_available=mis_eligible,
         )
-        self._instrument_info_cache[symbol] = info
-        return info
         self._instrument_info_cache[symbol] = info
         return info
 

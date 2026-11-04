@@ -109,7 +109,12 @@ def get_mcx_lot_multiplier(symbol_or_root: str) -> int:
     return 1
 
 
-def round_to_tick(price: float, tick_size: float, direction: str = "nearest") -> float:
+def round_to_tick(
+    price: float,
+    tick_size: float = 1.0,
+    mode: Literal["nearest", "floor", "ceil"] = "nearest",
+    direction: Optional[str] = None,
+) -> float:
     """Rounds price to tick_size using Decimal arithmetic.
 
     Supports:
@@ -119,12 +124,13 @@ def round_to_tick(price: float, tick_size: float, direction: str = "nearest") ->
     """
     if tick_size <= 0:
         return price
+    effective_mode = direction if direction is not None else mode
     d_price = Decimal(str(price))
     d_tick = Decimal(str(tick_size))
     num_ticks = d_price / d_tick
-    if direction == "floor":
+    if effective_mode == "floor":
         rounded_ticks = num_ticks.to_integral_value(rounding=ROUND_FLOOR)
-    elif direction == "ceil":
+    elif effective_mode == "ceil":
         rounded_ticks = num_ticks.to_integral_value(rounding=ROUND_CEILING)
     else:
         rounded_ticks = num_ticks.to_integral_value(rounding=ROUND_HALF_UP)
@@ -146,7 +152,7 @@ class OpeningRange:
 class OrderRequest:
     """Request to place an order. Not yet sent to broker."""
     symbol: str = ""
-    exchange: str = "NSE"
+    exchange: str = "MCX"
     side: Side = Side.BUY
     quantity: int = 0
     product: Product = Product.MIS
@@ -157,17 +163,17 @@ class OrderRequest:
     strategy_id: str = ""
 
 
-def make_broker_tag(session_tag: str, symbol: str = "", suffix: str = "") -> str:
+def make_broker_tag(session_tag: str = "AURUM", symbol: str = "", suffix: str = "") -> str:
     """Generate a Zerodha Kite Connect compliant order tag (strictly <= 20 chars).
 
     Structure:
-    - session_tag prefix (up to 5 chars, e.g. 'APEX3')
-    - symbol (up to 6 chars, e.g. 'SUNPHA', 'SLVMIC')
-    - suffix (up to 6 chars, e.g. 'E0935', 'SL', 'TGT', 'EMG', 'FLT', 'NWS')
+    - session_tag prefix (up to 5 chars, default 'AURUM')
+    - symbol (up to 6 chars, e.g. 'SLVMIC', 'GLDGIN', 'GLDTEN', 'SLVM', 'GLDM')
+    - suffix (up to 6 chars, e.g. 'ORB', 'SL', 'TGT', 'EMG', 'FLT', 'NWS', 'EXT')
     Joined by '_' and truncated to at most 20 characters total.
     Ensures tag.startswith(session_tag_prefix) always matches.
     """
-    prefix = (session_tag or "APEX3")[:5]
+    prefix = (session_tag or "AURUM")[:5]
     sym_clean = symbol or ""
     if sym_clean.upper().startswith("SILVERMIC"):
         sym_clean = "SLVMIC"
@@ -175,6 +181,16 @@ def make_broker_tag(session_tag: str, symbol: str = "", suffix: str = "") -> str
         sym_clean = "GLDGIN"
     elif sym_clean.upper().startswith("GOLDPETAL"):
         sym_clean = "GLDPTL"
+    elif sym_clean.upper().startswith("GOLDTEN"):
+        sym_clean = "GLDTEN"
+    elif sym_clean.upper().startswith("SILVERM"):
+        sym_clean = "SLVM"
+    elif sym_clean.upper().startswith("GOLDM"):
+        sym_clean = "GLDM"
+    elif sym_clean.upper().startswith("SILVER"):
+        sym_clean = "SLV"
+    elif sym_clean.upper().startswith("GOLD"):
+        sym_clean = "GLD"
     sym_short = sym_clean[:6]
     sfx = (suffix or "")[:6]
     parts = [p for p in (prefix, sym_short, sfx) if p]
@@ -235,6 +251,10 @@ class PositionState:
     entry_time: Optional[datetime] = None
     catalyst_aligned: bool = False
     macro_score_at_entry: float = 0.0
+    hwm_price: float = 0.0
+    hwm_r: float = 0.0
+    ratchet_stage: int = 0
+    playbook: str = "TREND"
 
 
 @dataclass(frozen=True)
@@ -305,6 +325,7 @@ class InstrumentInfo:
     """Exchange instrument metadata."""
     symbol: str
     exchange: str = "MCX"
+    symbol_root: str = ""
     tick_size: float = 1.0   # Default MCX tick size
     lot_size: int = 1
     order_lot_size: int = 1  # Exact lot_size from Zerodha kite.instruments("MCX") used in place_order

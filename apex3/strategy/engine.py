@@ -262,6 +262,7 @@ class StrategyEngine:
 
         return OrderRequest(
             symbol=symbol,
+            exchange=getattr(self.config, "exchange", "MCX"),
             side=side,
             quantity=quantity,
             product=Product.MIS,
@@ -615,6 +616,7 @@ class StrategyEngine:
                     if not ent_pos.protective_order_id:
                         sl_req = OrderRequest(
                             symbol=ent_pos.symbol,
+                            exchange=getattr(self.config, "exchange", "MCX"),
                             side=exit_side,
                             quantity=ent_pos.quantity,
                             product=Product.MIS,
@@ -823,6 +825,7 @@ class StrategyEngine:
                             )
                             sl_req = OrderRequest(
                                 symbol=ent_pos.symbol,
+                                exchange=getattr(self.config, "exchange", "MCX"),
                                 side=exit_side,
                                 quantity=ent_pos.quantity,
                                 product=Product.MIS,
@@ -2327,6 +2330,7 @@ class StrategyEngine:
             # Estimate order margin from broker
             dummy_req = OrderRequest(
                 symbol=sym,
+                exchange=getattr(self.config, "exchange", "MCX"),
                 side=side,
                 quantity=100,
                 price=entry_price,
@@ -2424,6 +2428,7 @@ class StrategyEngine:
 
             entry_req = OrderRequest(
                 symbol=sym,
+                exchange=getattr(self.config, "exchange", "MCX"),
                 side=side,
                 quantity=sizing.quantity,
                 product=Product.MIS,
@@ -2519,6 +2524,7 @@ class StrategyEngine:
                     # Place protective stop immediately for filled quantity
                     sl_req = OrderRequest(
                         symbol=sym,
+                        exchange=getattr(self.config, "exchange", "MCX"),
                         side=exit_side,
                         quantity=current_fill_qty,
                         product=Product.MIS,

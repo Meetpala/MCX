@@ -97,11 +97,20 @@ def parse_expiry_date(expiry_val: Any) -> Optional[date]:
         return expiry_val
     if isinstance(expiry_val, str):
         s = expiry_val.strip()
-        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S"):
+        for fmt in ("%Y-%m-%d", "%d%b%Y", "%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d %H:%M:%S", "%d%b%y"):
             try:
                 return datetime.strptime(s, fmt).date()
             except ValueError:
                 pass
+        import re
+        m = re.search(r"(\d{1,2}[A-Za-z]{3}\d{2,4})", s)
+        if m:
+            sub = m.group(1).upper()
+            for fmt in ("%d%b%y", "%d%b%Y"):
+                try:
+                    return datetime.strptime(sub, fmt).date()
+                except ValueError:
+                    pass
     return None
 
 
@@ -134,6 +143,11 @@ def resolve_active_mcx_futures(
             name = str(item.get("name", "")).upper().strip()
             symbol = str(item.get("symbol", "") or item.get("tradingsymbol", "")).upper().strip()
 
+            if symbol.endswith("CE") or symbol.endswith("PE"):
+                continue
+            if not symbol.endswith("FUT") and itype not in ("FUTCOM", "FUT"):
+                continue
+
             matched = False
             if name == clean_root:
                 matched = True
@@ -146,7 +160,7 @@ def resolve_active_mcx_futures(
                     matched = True
 
             if matched:
-                exp = parse_expiry_date(item.get("expiry"))
+                exp = parse_expiry_date(item.get("expiry") or item.get("tradingsymbol") or item.get("symbol"))
                 if exp is not None:
                     days_left = (exp - today).days
                     if days_left >= min_days_to_expiry:
@@ -632,7 +646,7 @@ class AngelDataProvider:
                     if isinstance(res, dict) and res.get("status") and isinstance(res.get("data"), list):
                         scrip_list.extend(res["data"])
                 except Exception as e:
-                    logger.debug("searchScrip failed for root %s: %s", root, e)
+                    logger.warning("searchScrip failed for root %s: %s", root, e)
 
         resolved_raw = resolve_active_mcx_futures(scrip_list, symbol_roots, min_days_to_expiry, today)
         results: dict[str, InstrumentInfo] = {}
@@ -644,7 +658,7 @@ class AngelDataProvider:
                 self._token_cache[tradingsymbol] = token
                 self._token_cache[root] = token
 
-            exp_date = parse_expiry_date(raw.get("expiry"))
+            exp_date = parse_expiry_date(raw.get("expiry") or raw.get("tradingsymbol") or raw.get("symbol"))
             dte = (exp_date - today).days if exp_date else 999
             order_lot = int(raw.get("lotsize", 1) or 1)
             lot_mult = get_mcx_lot_multiplier(tradingsymbol or root)
@@ -652,6 +666,7 @@ class AngelDataProvider:
             info = InstrumentInfo(
                 symbol=tradingsymbol or root,
                 exchange="MCX",
+                symbol_root=root,
                 tick_size=1.0,
                 lot_size=order_lot,
                 order_lot_size=order_lot,
