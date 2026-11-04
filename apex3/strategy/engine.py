@@ -23,7 +23,7 @@ import logging
 import threading
 import time as time_mod
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -108,12 +108,17 @@ class StrategyEngine:
         journal: Journal,
         session_tag: str = "APEX3",
         trade_logger: Optional[TradeLogger] = None,
+        macro_provider: Optional[Any] = None,
     ):
         self.config = config
         self.broker = broker
         self.journal = journal
         self.session_tag = session_tag
         self.trade_logger = trade_logger or TradeLogger(log_path="info.log", start_date="2026-10-28")
+
+        from apex3.news.macro_scraper import MacroNewsProvider
+        self.macro_provider = macro_provider or MacroNewsProvider(self.config)
+        self.latest_macro_state: Optional[Any] = None
 
         self.scheduler = SessionScheduler(config.schedule)
         self.state_machine = StateMachine(session_tag_prefix=session_tag)
@@ -480,8 +485,25 @@ class StrategyEngine:
                 ]
 
         # -------------------------------------------------------------
-        # STEP 2: Connectivity and Quote Freshness Gate
+        # STEP 2: Connectivity, Quote Freshness, and Macro News Gate
         # -------------------------------------------------------------
+        now_utc = (now if now.tzinfo else now.replace(tzinfo=IST)).astimezone(timezone.utc)
+        try:
+            macro_state = self.macro_provider.get_macro_state(now_utc)
+        except Exception as me:
+            logger.warning("Error reading macro state, gracefully degrading to neutral: %s", me)
+            from apex3.news.models import MacroRegimeState
+            macro_state = MacroRegimeState(
+                in_blackout_window=False,
+                minutes_to_next_high_event=None,
+                active_event_title="",
+                macro_score=0.0,
+                catalyst_aligned_buy=False,
+                catalyst_aligned_sell=False,
+                last_updated_utc=now_utc,
+            )
+        self.latest_macro_state = macro_state
+
         if not self.broker.is_session_valid():
             return [
                 StrategyDecision(
@@ -1166,6 +1188,103 @@ class StrategyEngine:
                 current_price = quote.last_price
                 inst_info = self.broker.get_instrument_info(pos.symbol)
 
+                # 0. Pre-News Protective Exit Check
+                unbuffered_min = 3.0
+                lock_be_threshold = 0.75
+                if hasattr(self.config, "news") and self.config.news:
+                    unbuffered_min = float(getattr(self.config.news, "pre_event_flatten_unbuffered_min", 3.0))
+                    lock_be_threshold = float(getattr(self.config.news, "pre_event_lock_be_threshold_r", 0.75))
+
+                mins_to_evt = getattr(macro_state, "minutes_to_next_high_event", None)
+                if mins_to_evt is not None and 0.0 < mins_to_evt <= unbuffered_min:
+                    unit_r = pos.r_value if pos.r_value > 0 else max(1.0, abs(pos.average_entry - pos.initial_stop_price))
+                    fav = (current_price - pos.average_entry) if pos.side == Side.BUY else (pos.average_entry - current_price)
+                    open_r = fav / unit_r if unit_r > 0 else 0.0
+
+                    is_locked_be = getattr(pos, "fee_lock_applied", False) or (
+                        pos.current_stop_price >= pos.average_entry if pos.side == Side.BUY else (pos.current_stop_price <= pos.average_entry and pos.current_stop_price > 0)
+                    )
+
+                    if open_r < lock_be_threshold and not is_locked_be and pos.phase == PositionPhase.OPEN_PROTECTED:
+                        logger.warning(
+                            "PRE_NEWS_PROTECTIVE_EXIT triggered for %s before %s: %.1fm to event, open_r=%.2fR < %.2fR",
+                            pos.symbol,
+                            getattr(macro_state, "active_event_title", "macro event"),
+                            mins_to_evt,
+                            open_r,
+                            lock_be_threshold,
+                        )
+                        if pos.protective_order_id:
+                            try:
+                                self.broker.cancel_order(pos.protective_order_id)
+                            except Exception as c_err:
+                                logger.warning("Error cancelling stop before pre-news exit for %s: %s", pos.symbol, c_err)
+                            self._confirm_order_terminal(pos.protective_order_id, timeout_sec=2.0)
+
+                        nws_tag = make_broker_tag(self.session_tag, pos.symbol, "NWS")
+                        exit_side = Side.SELL if pos.side == Side.BUY else Side.BUY
+                        exit_req = self._create_exit_order_request(
+                            symbol=pos.symbol,
+                            side=exit_side,
+                            quantity=pos.quantity,
+                            tag=nws_tag,
+                            current_price=current_price,
+                        )
+                        exit_order_id = self.broker.place_order(exit_req)
+                        pos.exit_order_id = exit_order_id
+                        pos.phase = PositionPhase.EXITING
+
+                        exit_state = self.broker.get_order_status(exit_order_id)
+                        if exit_state and exit_state.status == OrderStatus.COMPLETE:
+                            pos.phase = PositionPhase.CLOSED
+                            pos.quantity = 0
+                            fill_px = exit_state.average_price or current_price
+                            try:
+                                self.trade_logger.record_exit(
+                                    symbol=pos.symbol,
+                                    side=exit_side,
+                                    quantity=exit_state.filled_quantity or pos.quantity,
+                                    exit_price=fill_px,
+                                    entry_price=pos.average_entry,
+                                    order_id=exit_order_id,
+                                    trade_id=exit_order_id,
+                                    exit_reason="PRE_NEWS_PROTECTIVE_EXIT",
+                                    timestamp=now,
+                                    entry_time=getattr(pos, "entry_time", None) or getattr(pos, "entry_timestamp", None),
+                                    initial_stop=pos.initial_stop_price,
+                                )
+                            except Exception as log_err:
+                                logger.error("Error logging pre-news exit to trade_logger: %s", log_err)
+                        elif exit_state and exit_state.pending_quantity > 0:
+                            pos.quantity = exit_state.pending_quantity
+                            pos.phase = PositionPhase.EXITING
+
+                        self.journal.log_event(
+                            event_type="PRE_NEWS_PROTECTIVE_EXIT",
+                            symbol=pos.symbol,
+                            side=exit_side.value,
+                            data={
+                                "exit_order_id": exit_order_id,
+                                "tag": nws_tag,
+                                "minutes_to_event": mins_to_evt,
+                                "open_r": open_r,
+                            },
+                            explanation=f"Pre-news protective exit for {pos.symbol} before event with tag {nws_tag}",
+                        )
+
+                        decisions.append(
+                            StrategyDecision(
+                                decision=Decision.EXIT,
+                                symbol=pos.symbol,
+                                side=pos.side,
+                                timestamp_ist=now,
+                                reason_codes=["PRE_NEWS_PROTECTIVE_EXIT"],
+                                explanation=f"Pre-news protective exit before event ({mins_to_evt:.1f}m to event, open_r={open_r:.2f}R < {lock_be_threshold:.2f}R)",
+                                broker_action=f"EXIT_NEWS_{nws_tag}",
+                            )
+                        )
+                        continue
+
                 # 1. Fixed Target check (Option A: 2.0R Target)
                 if self.config.stops.use_fixed_target and pos.target_price > 0:
                     target_reached = False
@@ -1299,16 +1418,28 @@ class StrategyEngine:
                     )
                     atr_val = atr_series[-1] if atr_series else (current_price * 0.01)
 
-                    trail_eval = evaluate_trailing_stop(
-                        position=pos.to_position_state(),
-                        current_price=current_price,
-                        atr_5m=atr_val,
-                        candles_1m=candles_1m,
-                        config=self.config.stops,
-                        costs_config=self.config.costs,
-                        current_ist_time=now.time(),
-                        tick_size=inst_info.tick_size,
-                    )
+                    if getattr(self.config, "exchange", "MCX") == "MCX":
+                        from apex3.strategy.trail import evaluate_progressive_ratchet
+                        trail_eval = evaluate_progressive_ratchet(
+                            pos=pos.to_position_state(),
+                            current_price=current_price,
+                            candles_5m=candles_5m,
+                            atr_14=atr_val,
+                            config=self.config,
+                            tick_size=inst_info.tick_size,
+                            macro_state=macro_state,
+                        )
+                    else:
+                        trail_eval = evaluate_trailing_stop(
+                            position=pos.to_position_state(),
+                            current_price=current_price,
+                            atr_5m=atr_val,
+                            candles_1m=candles_1m,
+                            config=self.config.stops,
+                            costs_config=self.config.costs,
+                            current_ist_time=now.time(),
+                            tick_size=inst_info.tick_size,
+                        )
 
                     # Update High/Low water mark
                     pos.best_favorable_price = trail_eval.best_favorable_price

@@ -207,6 +207,7 @@ def evaluate_signal(
     config: SignalConfig,
     is_entry_window: bool = True,
     is_core_symbol: bool = True,
+    macro_state: Optional[Any] = None,
 ) -> SignalEvaluation:
     """Evaluate a single stock for entry signal across all 8 gates.
 
@@ -457,6 +458,27 @@ def evaluate_signal(
             reason=f"Regime aligns with target side: {target_side.value}",
         )
     )
+
+    # Gate 10: Macro News Blackout and Directional Bias
+    if macro_state is not None:
+        passed, rej_code = evaluate_news_gate(target_side, macro_state, getattr(config, "news", None))
+        if not passed:
+            gates.append(
+                GateResult(
+                    name="MACRO_NEWS",
+                    status=GateStatus.FAIL,
+                    reason=f"Macro news gate triggered: {rej_code}",
+                    data={"code": rej_code},
+                )
+            )
+            return SignalEvaluation(
+                symbol=symbol,
+                decision=Decision.WAIT,
+                gates=gates,
+                reason_codes=[rej_code],
+                explanation=f"Macro news gate failed: {rej_code}",
+            )
+        gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
 
     # 4. Opening Range Breakout Gate (with Breakout Cushion & CLV Conviction)
     cushion_mult = getattr(config, "min_breakout_cushion_atr", 0.15)
@@ -855,6 +877,8 @@ class TradeSignal:
     volume_surge_ratio: float
     relative_strength: float
     conviction_score: float
+    catalyst_aligned: bool = False
+    macro_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -984,12 +1008,51 @@ def validate_late_start_signal(
     )
 
 
+def evaluate_news_gate(
+    side: Union[Side, str],
+    macro_state: Optional[Any],
+    news_cfg: Any = None,
+) -> tuple[bool, str]:
+    """Gate 10: Macro news blackout and directional bias gate.
+
+    Returns:
+        (is_passed: bool, rejection_code: str)
+    """
+    if macro_state is None:
+        return True, "PASS"
+
+    block_thresh = 0.50
+    if news_cfg:
+        block_thresh = float(
+            getattr(news_cfg, "macro_block_threshold", 0.50)
+            if not isinstance(news_cfg, dict)
+            else news_cfg.get("macro_block_threshold", 0.50)
+        )
+
+    if getattr(macro_state, "in_blackout_window", False):
+        return False, "MACRO_EVENT_BLACKOUT"
+
+    is_buy = (side in (Side.BUY, "BUY", "LONG"))
+    is_sell = (side in (Side.SELL, "SELL", "SHORT"))
+    m_score = float(getattr(macro_state, "macro_score", 0.0))
+
+    if is_buy and m_score <= -block_thresh:
+        return False, "REJECTED_AGAINST_BEARISH_MACRO_NEWS"
+
+    if is_sell and m_score >= block_thresh:
+        return False, "REJECTED_AGAINST_BULLISH_MACRO_NEWS"
+
+    return True, "PASS"
+
+
 def evaluate_candidate_signal(
     bar: StockCandidateBar,
     regime: MarketRegime,
     active_positions_count: int,
     cfg: dict,
-) -> Optional[TradeSignal]:
+    macro_state: Optional[Any] = None,
+    return_rejection: bool = False,
+) -> Any:
     """
     Evaluates all 9 fail-closed entry gates on a candidate symbol from the radar.
     Returns a ranked TradeSignal if all gates pass, else None.
@@ -1019,6 +1082,19 @@ def evaluate_candidate_signal(
         side = "SHORT"
     else:
         return None
+
+    # Gate 10: Macro News Blackout and Directional Bias Gate
+    news_cfg = cfg.get("news", {}) if isinstance(cfg, dict) else getattr(cfg, "news", None)
+    if macro_state is None and isinstance(cfg, dict):
+        macro_state = cfg.get("macro_state")
+
+    if macro_state is not None:
+        passed, rej_code = evaluate_news_gate(side, macro_state, news_cfg)
+        evaluate_candidate_signal.last_rejection_reason = rej_code
+        if not passed:
+            return rej_code if return_rejection else None
+    else:
+        evaluate_candidate_signal.last_rejection_reason = ""
 
     # Gate 9A: Opening Range Width Cap (1.05%)
     if bar.or_low > 0:
@@ -1104,6 +1180,46 @@ def evaluate_candidate_signal(
     core_mult = float(radar_cfg.get("core_conviction_multiplier", 1.35)) if is_core else 1.0
     conviction_score = core_mult * ((abs(rel_strength) * 100.0 * vol_ratio) / spread_floor)
 
+    catalyst_aligned = False
+    m_score = 0.0
+    if macro_state is not None:
+        m_score = float(getattr(macro_state, "macro_score", 0.0))
+        is_buy = (side == "LONG")
+        aligned = (is_buy and getattr(macro_state, "catalyst_aligned_buy", False)) or (not is_buy and getattr(macro_state, "catalyst_aligned_sell", False))
+        if aligned:
+            conviction_score *= 1.40
+            catalyst_aligned = True
+            # Expand target to catalyst_target_r (3.50R)
+            target_r = 3.50
+            if news_cfg:
+                target_r = float(getattr(news_cfg, "catalyst_target_r", 3.50) if not isinstance(news_cfg, dict) else news_cfg.get("catalyst_target_r", 3.50))
+            if is_buy:
+                new_tgt = bar.close + (target_r * levels.risk_per_share)
+                levels = levels.__class__(
+                    side=levels.side,
+                    entry_price=levels.entry_price,
+                    initial_stop=levels.initial_stop,
+                    current_stop=levels.current_stop,
+                    target_price=round_to_tick(new_tgt, tick_size=getattr(bar, "tick_size", 0.05) or 0.05, direction="floor"),
+                    risk_per_share=levels.risk_per_share,
+                    risk_pct=levels.risk_pct,
+                    fee_lock_applied=levels.fee_lock_applied,
+                    tick_size=levels.tick_size,
+                )
+            else:
+                new_tgt = bar.close - (target_r * levels.risk_per_share)
+                levels = levels.__class__(
+                    side=levels.side,
+                    entry_price=levels.entry_price,
+                    initial_stop=levels.initial_stop,
+                    current_stop=levels.current_stop,
+                    target_price=round_to_tick(new_tgt, tick_size=getattr(bar, "tick_size", 0.05) or 0.05, direction="ceil"),
+                    risk_per_share=levels.risk_per_share,
+                    risk_pct=levels.risk_pct,
+                    fee_lock_applied=levels.fee_lock_applied,
+                    tick_size=levels.tick_size,
+                )
+
     return TradeSignal(
         symbol=bar.symbol,
         side=side,
@@ -1112,4 +1228,6 @@ def evaluate_candidate_signal(
         volume_surge_ratio=round(vol_ratio, 2),
         relative_strength=round(rel_strength, 5),
         conviction_score=round(conviction_score, 4),
+        catalyst_aligned=catalyst_aligned,
+        macro_score=m_score,
     )

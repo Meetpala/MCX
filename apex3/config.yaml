@@ -207,3 +207,18 @@ rate_limits:
   quotes_per_second: 5
   historical_per_second: 3
   general_per_second: 10
+
+news:
+  enabled: true
+  calendar_poll_interval_sec: 60
+  wire_poll_interval_sec: 15
+  pre_event_blackout_min: 15.0
+  post_event_blackout_min: 5.0
+  pre_event_flatten_unbuffered_min: 3.0
+  pre_event_lock_be_threshold_r: 0.75
+  macro_block_threshold: 0.50         # Blocks BUY if macro_score <= -0.50; blocks SELL if >= +0.50
+  catalyst_boost_threshold: 0.60      # Boosts conviction 1.4x and expands target_r to 3.50R
+  catalyst_target_r: 3.50
+  catalyst_trail_offset_r: 0.55
+  opposing_shock_threshold: 0.75      # Tightens stop immediately if breaking shock opposes open trade
+

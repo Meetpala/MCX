@@ -281,21 +281,41 @@ class AngelDataProvider:
     def resolve_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve exchange symbol token for Angel One. Fails closed on unmapped symbols."""
         clean = symbol.replace("-EQ", "").upper()
-        if clean in self._token_cache:
+        # For equity, cached tokens are static; for MCX futures, dynamically resolve front-month
+        if exchange != "MCX" and clean in self._token_cache:
             return self._token_cache[clean]
+
         if self._smart_api and self._auth_token and hasattr(self._smart_api, "searchScrip"):
             try:
                 res = self._smart_api.searchScrip(exchange, clean)
                 if isinstance(res, dict) and res.get("status") and isinstance(res.get("data"), list):
-                    target_ts = f"{clean}-EQ"
-                    for item in res["data"]:
-                        if isinstance(item, dict) and str(item.get("tradingsymbol", "")).upper() == target_ts:
-                            tok = str(item.get("symboltoken", "")).strip()
+                    if exchange == "MCX":
+                        fut_matches = [
+                            item for item in res["data"]
+                            if isinstance(item, dict)
+                            and str(item.get("tradingsymbol", "")).upper().startswith(clean)
+                            and str(item.get("tradingsymbol", "")).upper().endswith("FUT")
+                        ]
+                        if fut_matches:
+                            # Select nearest contract (sort by tradingsymbol or token)
+                            tok = str(fut_matches[0].get("symboltoken", "")).strip()
                             if tok:
                                 self._token_cache[clean] = tok
                                 return tok
+                    else:
+                        target_ts = f"{clean}-EQ"
+                        for item in res["data"]:
+                            if isinstance(item, dict) and str(item.get("tradingsymbol", "")).upper() == target_ts:
+                                tok = str(item.get("symboltoken", "")).strip()
+                                if tok:
+                                    self._token_cache[clean] = tok
+                                    return tok
             except Exception as e:
                 logger.debug("Angel One searchScrip lookup failed for %s: %s", clean, e)
+
+        if clean in self._token_cache:
+            return self._token_cache[clean]
+
         logger.error("Unknown Angel One token mapping for symbol %s in %s (no default fallback)", clean, exchange)
         return ""
 

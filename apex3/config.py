@@ -92,6 +92,23 @@ class RatchetConfig:
 
 
 @dataclass(frozen=True)
+class NewsConfig:
+    enabled: bool = True
+    calendar_poll_interval_sec: int = 60
+    wire_poll_interval_sec: int = 15
+    pre_event_blackout_min: float = 15.0
+    post_event_blackout_min: float = 5.0
+    pre_event_flatten_unbuffered_min: float = 3.0
+    pre_event_lock_be_threshold_r: float = 0.75
+    macro_block_threshold: float = 0.50
+    catalyst_boost_threshold: float = 0.60
+    catalyst_target_r: float = 3.50
+    catalyst_trail_offset_r: float = 0.55
+    opposing_shock_threshold: float = 0.75
+
+
+
+@dataclass(frozen=True)
 class WatchlistConfig:
     symbols: list[str] = field(default_factory=list)
     scanner_enabled: bool = False
@@ -318,6 +335,7 @@ class AppConfig:
     costs: CostsConfig = field(default_factory=CostsConfig)
     journal: JournalConfig = field(default_factory=JournalConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     secrets: SecretsConfig = field(default_factory=SecretsConfig)
     raw_dict: dict = field(default_factory=dict)
 
@@ -419,6 +437,22 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     costs_raw = raw.get("costs", {})
     journal_raw = raw.get("journal", {})
     dashboard_raw = raw.get("dashboard", {})
+    news_raw = raw.get("news", {})
+
+    news_config = NewsConfig(
+        enabled=bool(news_raw.get("enabled", True)),
+        calendar_poll_interval_sec=int(news_raw.get("calendar_poll_interval_sec", 60)),
+        wire_poll_interval_sec=int(news_raw.get("wire_poll_interval_sec", 15)),
+        pre_event_blackout_min=float(news_raw.get("pre_event_blackout_min", 15.0)),
+        post_event_blackout_min=float(news_raw.get("post_event_blackout_min", 5.0)),
+        pre_event_flatten_unbuffered_min=float(news_raw.get("pre_event_flatten_unbuffered_min", 3.0)),
+        pre_event_lock_be_threshold_r=float(news_raw.get("pre_event_lock_be_threshold_r", 0.75)),
+        macro_block_threshold=float(news_raw.get("macro_block_threshold", 0.50)),
+        catalyst_boost_threshold=float(news_raw.get("catalyst_boost_threshold", 0.60)),
+        catalyst_target_r=float(news_raw.get("catalyst_target_r", 3.50)),
+        catalyst_trail_offset_r=float(news_raw.get("catalyst_trail_offset_r", 0.55)),
+        opposing_shock_threshold=float(news_raw.get("opposing_shock_threshold", 0.75)),
+    )
 
     # MCX Production Fields
     exchange = str(raw.get("exchange", "MCX"))
@@ -666,6 +700,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             auth_required=bool(dashboard_raw.get("auth_required", False)),
             api_token=str(dashboard_raw.get("api_token", "")),
         ),
+        news=news_config,
         secrets=_load_secrets(),
         raw_dict=raw,
     )

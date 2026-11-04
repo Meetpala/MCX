@@ -162,13 +162,20 @@ def make_broker_tag(session_tag: str, symbol: str = "", suffix: str = "") -> str
 
     Structure:
     - session_tag prefix (up to 5 chars, e.g. 'APEX3')
-    - symbol (up to 6 chars, e.g. 'SUNPHA')
-    - suffix (up to 6 chars, e.g. 'E0935', 'SL', 'TGT', 'EMG', 'FLT')
+    - symbol (up to 6 chars, e.g. 'SUNPHA', 'SLVMIC')
+    - suffix (up to 6 chars, e.g. 'E0935', 'SL', 'TGT', 'EMG', 'FLT', 'NWS')
     Joined by '_' and truncated to at most 20 characters total.
     Ensures tag.startswith(session_tag_prefix) always matches.
     """
     prefix = (session_tag or "APEX3")[:5]
-    sym_short = (symbol or "")[:6]
+    sym_clean = symbol or ""
+    if sym_clean.upper().startswith("SILVERMIC"):
+        sym_clean = "SLVMIC"
+    elif sym_clean.upper().startswith("GOLDGUINEA"):
+        sym_clean = "GLDGIN"
+    elif sym_clean.upper().startswith("GOLDPETAL"):
+        sym_clean = "GLDPTL"
+    sym_short = sym_clean[:6]
     sfx = (suffix or "")[:6]
     parts = [p for p in (prefix, sym_short, sfx) if p]
     tag = "_".join(parts)
@@ -226,6 +233,8 @@ class PositionState:
     # Strategy metadata
     strategy_tag: str = ""
     entry_time: Optional[datetime] = None
+    catalyst_aligned: bool = False
+    macro_score_at_entry: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -307,3 +316,11 @@ class InstrumentInfo:
     upper_circuit: float = 0.0
     lower_circuit: float = 0.0
     mis_available: bool = True
+
+
+def __getattr__(name: str):
+    if name == "ManagedPosition":
+        from apex3.reconciliation.state_machine import ManagedPosition
+        return ManagedPosition
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+

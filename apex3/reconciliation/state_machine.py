@@ -64,6 +64,8 @@ class ManagedPosition:
     entry_timestamp: Optional[datetime] = None
     requested_quantity: int = 0
     last_reconciled: Optional[datetime] = None
+    catalyst_aligned: bool = False
+    macro_score_at_entry: float = 0.0
 
     def to_position_state(self) -> PositionState:
         """Convert to public PositionState model."""
@@ -94,6 +96,8 @@ class ManagedPosition:
             fee_lock_applied=self.fee_lock_applied,
             strategy_tag=self.strategy_tag,
             entry_time=self.entry_timestamp,
+            catalyst_aligned=self.catalyst_aligned,
+            macro_score_at_entry=self.macro_score_at_entry,
         )
 
 

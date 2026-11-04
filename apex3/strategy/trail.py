@@ -213,6 +213,7 @@ def evaluate_progressive_ratchet(
     atr_14: float,
     config: Any = None,
     tick_size: float = 1.0,
+    macro_state: Optional[Any] = None,
 ) -> StopEvaluation:
     """Evaluate 4-Stage Progressive Ratchet Trailing Stop for MCX Precious Metals.
 
@@ -337,6 +338,45 @@ def evaluate_progressive_ratchet(
     else:
         stage_name = "Stage 0 (Initial Breathing)"
         candidate_sl = initial_stop
+
+    # Pre-Event Shield & Opposing Breaking Shock Tightener
+    current_favorable = (current_price - entry_price) if is_long else (entry_price - current_price)
+    current_r = current_favorable / unit_risk_1r if unit_risk_1r > 0 else 0.0
+
+    news_cfg = getattr(config, "news", None) if config else None
+    if isinstance(config, dict) and "news" in config:
+        news_cfg = config["news"]
+    if macro_state is None and isinstance(config, dict) and "macro_state" in config:
+        macro_state = config["macro_state"]
+
+    be_threshold_r = float(getattr(news_cfg, "pre_event_lock_be_threshold_r", 0.75) if news_cfg else 0.75)
+    opposing_thresh = float(getattr(news_cfg, "opposing_shock_threshold", 0.75) if news_cfg else 0.75)
+    be_plus = (entry_price + be_offset) if is_long else (entry_price - be_offset)
+
+    if macro_state is not None:
+        # Pre-Event Shield: if 0 < minutes_to_next_high_event <= 5.0 and current_r >= 0.75R
+        mins = getattr(macro_state, "minutes_to_next_high_event", None)
+        if mins is not None and 0.0 < mins <= 5.0 and current_r >= be_threshold_r:
+            if is_long:
+                candidate_sl = max(candidate_sl, be_plus)
+            else:
+                candidate_sl = min(candidate_sl, be_plus)
+            stage_name = "Pre-Event Shield (BE+)"
+            trail_activated = True
+
+        # Opposing Breaking Shock Tightener:
+        m_score = getattr(macro_state, "macro_score", 0.0)
+        if current_r >= 0.50:
+            if is_long and m_score <= -opposing_thresh:
+                shock_sl = round_to_tick(current_price - (0.5 * atr_14), tick_size=t_size, round_up=False)
+                candidate_sl = max(candidate_sl, be_plus, shock_sl)
+                stage_name = "Opposing Shock Tightener"
+                trail_activated = True
+            elif not is_long and m_score >= opposing_thresh:
+                shock_sl = round_to_tick(current_price + (0.5 * atr_14), tick_size=t_size, round_up=True)
+                candidate_sl = min(candidate_sl, be_plus, shock_sl)
+                stage_name = "Opposing Shock Tightener"
+                trail_activated = True
 
     # 3. Enforce Strict Monotonicity Invariant
     if is_long:
@@ -680,6 +720,8 @@ def calculate_target_price(
     initial_stop: float,
     target_r: float = 2.0,
     tick_size: float = 0.05,
+    pos: Optional[Any] = None,
+    config: Optional[Any] = None,
 ) -> float:
     """Calculate take-profit target price at a fixed R-multiple from entry (Option A).
 
@@ -687,17 +729,29 @@ def calculate_target_price(
         side: BUY or SELL
         entry_price: Average entry fill price
         initial_stop: Initial structural stop price
-        target_r: R-multiple for target (e.g. 2.0 for 2:1 Reward to Risk)
+        target_r: R-multiple for target (e.g. 2.0 or 2.5)
         tick_size: Instrument tick size
+        pos: Optional position state; if pos.catalyst_aligned is True, expands to 3.50R
+        config: Optional configuration object
 
     Returns:
         Rounded target price.
     """
+    r_mult = target_r
+    if pos is not None and getattr(pos, "catalyst_aligned", False):
+        news_cfg = getattr(config, "news", None) if config else None
+        if news_cfg:
+            r_mult = float(getattr(news_cfg, "catalyst_target_r", 3.50))
+        elif isinstance(config, dict) and "news" in config:
+            r_mult = float(config["news"].get("catalyst_target_r", 3.50))
+        else:
+            r_mult = 3.50
+
     r_val = abs(entry_price - initial_stop)
     if side == Side.BUY:
-        target = entry_price + (target_r * r_val)
+        target = entry_price + (r_mult * r_val)
         return round_to_tick(target, tick_size=tick_size, round_up=False)
     else:
-        target = entry_price - (target_r * r_val)
+        target = entry_price - (r_mult * r_val)
         return round_to_tick(target, tick_size=tick_size, round_up=True)
 
