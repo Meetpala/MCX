@@ -395,6 +395,8 @@ def evaluate_aurum_signal(
     atr14 = atr_series[-1] if atr_series else max(latest_bar.high - latest_bar.low, 1.0)
     ema_series = compute_ema(closes, period=20)
     ema20 = ema_series[-1] if ema_series else (sum(closes) / len(closes) if closes else signal_price)
+    ema50_series = compute_ema(closes, period=50)
+    ema50 = ema50_series[-1] if ema50_series else None
 
     stock_vwap, sigma_vwap = calculate_session_anchored_vwap(completed)
     bar_range = max(latest_bar.high - latest_bar.low, 1.0)
@@ -487,6 +489,7 @@ def evaluate_aurum_signal(
         # Trigger A1: OR Breakout
         effective_band = max(sigma_vwap, 0.75 * atr14)
         not_overextended = (sigma_vwap <= 0) or (signal_price <= stock_vwap + 1.85 * effective_band)
+        htf_ok = (ema50 is None) or (signal_price >= ema50)
         if (
             signal_price >= opening_range.high + cushion
             and clv_buy >= 0.70
@@ -494,6 +497,7 @@ def evaluate_aurum_signal(
             and not_overextended
             and signal_price > stock_vwap
             and signal_price > ema20
+            and htf_ok
         ):
             res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakout passed")]
             return SignalEvaluation(
@@ -543,6 +547,7 @@ def evaluate_aurum_signal(
         # Trigger A1: OR Breakdown
         effective_band = max(sigma_vwap, 0.75 * atr14)
         not_overextended = (sigma_vwap <= 0) or (signal_price >= stock_vwap - 1.85 * effective_band)
+        htf_ok = (ema50 is None) or (signal_price <= ema50)
         if (
             signal_price <= opening_range.low - cushion
             and clv_sell >= 0.70
@@ -550,6 +555,7 @@ def evaluate_aurum_signal(
             and not_overextended
             and signal_price < stock_vwap
             and signal_price < ema20
+            and htf_ok
         ):
             res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakdown passed")]
             return SignalEvaluation(

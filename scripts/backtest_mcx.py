@@ -39,13 +39,14 @@ class Trade:
     def r_net(self): return self.net / self.r_rs if self.r_rs else 0.0
 
 
-def session_windows(d: date):
+def session_windows(d: date, comex_delay: bool = False):
     dst = is_us_dst(d)
     com_start = time(17, 0) if dst else time(18, 0)
     com_or_end = time(17, 30) if dst else time(18, 30)
+    com_entry_start = (time(18, 45) if dst else time(19, 30)) if comex_delay else com_or_end
     return {
-        "MORNING": dict(start=time(9, 0), or_end=time(9, 15), entry_end=time(14, 0), flat=time(16, 45)),
-        "COMEX": dict(start=com_start, or_end=com_or_end, entry_end=time(21, 45) if dst else time(22, 30), flat=time(23, 15)),
+        "MORNING": dict(start=time(9, 0), or_end=time(9, 15), entry_start=time(9, 15), entry_end=time(14, 0), flat=time(16, 45)),
+        "COMEX": dict(start=com_start, or_end=com_or_end, entry_start=com_entry_start, entry_end=time(21, 45) if dst else time(22, 30), flat=time(23, 15)),
     }
 
 
@@ -62,10 +63,11 @@ def regime_for(candles):
 
 def run(args):
     data = pickle.load(open(CACHE, "rb"))
-    root = "SILVERMIC"
+    root = getattr(args, "symbol", "SILVERMIC").upper()
     sym = data[root]["symbol"]
     candles = [c for c in data[root]["candles"] if c.is_complete]
-    sib_all = data.get("GOLDGUINEA", {}).get("candles", [])
+    sibling_root = "GOLDGUINEA" if "SILVER" in root else "SILVERMIC"
+    sib_all = data.get(sibling_root, {}).get("candles", [])
     mult = get_mcx_lot_multiplier(root)
     tick = 1.0
     inst = InstrumentInfo(symbol=sym, exchange="MCX", tick_size=tick, lot_multiplier=mult)
@@ -82,7 +84,7 @@ def run(args):
     for di, d in enumerate(days):
         if d.weekday() >= 5:
             continue
-        win = session_windows(d)
+        win = session_windows(d, comex_delay=getattr(args, "comex_delay", False))
         for sname, w in win.items():
             if args.sessions == "evening" and sname != "COMEX": continue
             if args.sessions == "morning" and sname != "MORNING": continue
@@ -98,6 +100,8 @@ def run(args):
             while i < len(bars) - 1:
                 bar = bars[i]
                 t = bar.timestamp.astimezone(IST).time()
+                if t < w["entry_start"]:
+                    i += 1; continue
                 if t >= w["entry_end"] or n_taken >= args.max_trades or losses >= args.max_losses:
                     break
                 hist = prior + bars[: i + 1]
@@ -113,6 +117,17 @@ def run(args):
                 nxt = bars[i + 1]
                 entry = nxt.open + (args.slip_ticks * tick if side == Side.BUY else -args.slip_ticks * tick)
                 closes = [c.close for c in hist]; highs = [c.high for c in hist]; lows = [c.low for c in hist]
+                if getattr(args, "side", "both") != "both":
+                    if side.value.lower() != args.side.lower():
+                        i += 1; continue
+                if getattr(args, "htf_filter", False):
+                    ema50_s = compute_ema(closes, 50)
+                    if ema50_s:
+                        e50 = ema50_s[-1]
+                        if side == Side.BUY and entry < e50:
+                            i += 1; continue
+                        if side == Side.SELL and entry > e50:
+                            i += 1; continue
                 atr_s = compute_atr(highs, lows, closes, period=14)
                 atr = atr_s[-1] if atr_s else (bar.high - bar.low)
                 lb = hist[-5:]
@@ -184,7 +199,11 @@ def report(trades, args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--symbol", default="SILVERMIC")
     ap.add_argument("--sessions", default="both")
+    ap.add_argument("--side", default="both")
+    ap.add_argument("--htf-filter", action="store_true")
+    ap.add_argument("--comex-delay", action="store_true")
     ap.add_argument("--max-trades", type=int, default=2)
     ap.add_argument("--max-losses", type=int, default=2)
     ap.add_argument("--target-r", type=float, default=3.5)

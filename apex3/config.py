@@ -171,6 +171,8 @@ class SignalConfig:
     relative_strength_lookback: int = 20
     min_stop_distance_pct: float = 0.0055
     max_stop_distance_pct: float = 0.0090
+    mcx_min_stop_distance_pct: float = 0.0018
+    mcx_max_stop_distance_pct: float = 0.0045
     min_breakout_cushion_atr: float = 0.15
     min_clv_ratio: float = 0.70
     min_atr_pct: float = 0.0022

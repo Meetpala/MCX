@@ -639,7 +639,7 @@ class StrategyEngine:
         decisions: list[StrategyDecision] = []
         is_mcx_conf = getattr(self.config, "exchange", "NSE").upper() == "MCX"
         effective_target_r = (
-            max(float(getattr(self.config.stops, "target_r", 3.5)), 3.5)
+            max(float(getattr(self.config.stops, "target_r", 4.5)), 4.5)
             if (is_mcx_conf and self.config.stops.trail_enabled)
             else self.config.stops.target_r
         )
@@ -2423,7 +2423,7 @@ class StrategyEngine:
             is_sym_mcx = (inst_exch == "MCX") or any(sym.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS")) or (is_mcx and inst_exch != "NSE")
             if is_sym_mcx:
                 min_stop_pct = getattr(self.config.signal, "mcx_min_stop_distance_pct", 0.0018)
-                max_stop_pct = getattr(self.config.signal, "mcx_max_stop_distance_pct", 0.0065)
+                max_stop_pct = getattr(self.config.signal, "mcx_max_stop_distance_pct", 0.0045)
             else:
                 min_stop_pct = getattr(self.config.signal, "min_stop_distance_pct", 0.0055)
                 max_stop_pct = getattr(self.config.signal, "max_stop_distance_pct", 0.0090)
@@ -2444,7 +2444,7 @@ class StrategyEngine:
             # If the trigger bar closed more than 5 minutes before `now`, validate that price is still
             # within slip_pct of signal_price, stop-loss was not hit, and target was not hit.
             effective_target_r = (
-                max(float(getattr(self.config.stops, "target_r", 3.5)), 3.5)
+                max(float(getattr(self.config.stops, "target_r", 4.5)), 4.5)
                 if (is_sym_mcx and self.config.stops.trail_enabled)
                 else self.config.stops.target_r
             )
