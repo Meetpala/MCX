@@ -265,6 +265,10 @@ class AngelDataProvider:
             logger.error("Failed to connect to Angel One SmartAPI: %s", e)
             return False
 
+    def get_feed_token(self) -> Optional[str]:
+        """Return the active Angel One SmartAPI feed token for WebSocket / market data stream."""
+        return self._feed_token
+
     def is_session_valid(self) -> bool:
         """Verify that Angel One SmartAPI session is active, auto-refreshing via TOTP after daily reset."""
         if not self._smart_api or not self._auth_token:
