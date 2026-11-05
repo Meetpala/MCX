@@ -73,7 +73,7 @@ class GatesConfig:
 
 @dataclass(frozen=True)
 class RatchetConfig:
-    target_r: float = 3.50
+    target_r: float = 4.50
     stage0_breathing_r: float = 1.00
     stage1_trigger_r: float = 1.00
     stage1_lock_r: float = 0.18
@@ -509,7 +509,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     sessions_config = SessionsConfig(
         morning_or_start=str(sessions_raw.get("morning_or_start", "09:00")),
         morning_or_end=str(sessions_raw.get("morning_or_end", "09:15")),
-        morning_entry_end=str(sessions_raw.get("morning_entry_end", "13:30")),
+        morning_entry_end=str(sessions_raw.get("morning_entry_end", "14:00")),
         morning_profit_lock_time=str(sessions_raw.get("morning_profit_lock_time", "14:15")),
         comex_or_start_edt=str(sessions_raw.get("comex_or_start_edt", "17:00")),
         comex_or_end_edt=str(sessions_raw.get("comex_or_end_edt", "17:30")),
@@ -537,7 +537,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 
     ratchet_raw = raw.get("ratchet", {})
     ratchet_config = RatchetConfig(
-        target_r=float(ratchet_raw.get("target_r", 3.50)),
+        target_r=float(ratchet_raw.get("target_r", 2.50)),
         stage0_breathing_r=float(ratchet_raw.get("stage0_breathing_r", 1.00)),
         stage1_trigger_r=float(ratchet_raw.get("stage1_trigger_r", 1.00)),
         stage1_lock_r=float(ratchet_raw.get("stage1_lock_r", 0.18)),

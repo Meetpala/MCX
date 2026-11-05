@@ -215,8 +215,14 @@ def run_app():
         if hasattr(broker, "resolve_active_mcx_futures"):
             try:
                 active_map = broker.resolve_active_mcx_futures(mcx_roots)
-                resolved_symbols = [active_map.get(r, r) for r in mcx_roots]
-                logger.info("Resolved MCX root symbols to active dated contracts: %s", active_map)
+                def _sym_str(v: Any) -> str:
+                    if hasattr(v, "symbol"):
+                        return str(v.symbol)
+                    if isinstance(v, dict):
+                        return str(v.get("symbol") or v.get("tradingsymbol") or v)
+                    return str(v)
+                resolved_symbols = [_sym_str(active_map.get(r, r)) for r in mcx_roots]
+                logger.info("Resolved MCX root symbols to active dated contracts: %s", resolved_symbols)
             except Exception as res_e:
                 logger.warning("Could not resolve active MCX futures at startup (using roots): %s", res_e)
         engine.set_manual_symbols(resolved_symbols)

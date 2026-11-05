@@ -525,7 +525,7 @@ def evaluate_aurum_signal(
                 for c in recent_pullback_bars
             )
             resumption = latest_bar.close > completed[-2].high
-            if lows_in_zone and resumption and clv_buy >= 0.70 and rvol >= 1.35:
+            if lows_in_zone and resumption and clv_buy >= 0.70 and rvol >= 1.35 and htf_ok:
                 res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A2 Pullback Continuation passed")]
                 return SignalEvaluation(
                     symbol=symbol,
@@ -583,7 +583,7 @@ def evaluate_aurum_signal(
                 for c in recent_pullback_bars
             )
             resumption = latest_bar.close < completed[-2].low
-            if highs_in_zone and resumption and clv_sell >= 0.70 and rvol >= 1.35:
+            if highs_in_zone and resumption and clv_sell >= 0.70 and rvol >= 1.35 and htf_ok:
                 res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A2 Bearish Pullback Continuation passed")]
                 return SignalEvaluation(
                     symbol=symbol,
