@@ -55,9 +55,9 @@ from apex3.reconciliation.reconciler import Reconciler
 from apex3.reconciliation.state_machine import PositionPhase, StateMachine
 from apex3.strategy.accounting import build_session_pnl
 from apex3.strategy.regime import MarketRegime, evaluate_market_regime
-from apex3.strategy.risk import evaluate_portfolio_risk
+from apex3.strategy.risk import evaluate_portfolio_risk, get_mcx_lot_multiplier
 from apex3.strategy.schedule import SessionScheduler, SessionState
-from apex3.strategy.signal import build_opening_range, evaluate_signal, validate_late_start_signal
+from apex3.strategy.signal import build_opening_range, evaluate_signal, validate_late_start_signal, is_us_dst
 from apex3.strategy.sizer import size_position
 from apex3.strategy.trail import (
     calculate_initial_stop,
@@ -142,6 +142,9 @@ class StrategyEngine:
         self.latest_regime_eval: Optional[Any] = None
         self.latest_session_pnl: Optional[Any] = None
         self._late_start_catchup_done: set[str] = set()
+        self._latest_margin_info: Optional[MarginInfo] = None
+        self._consecutive_losses: int = 0
+        self._last_trade_exit_time: Optional[datetime] = None
 
     def _ensure_ist(self, dt: datetime) -> datetime:
         """Normalize any naive or aware datetime to Asia/Kolkata (IST)."""
@@ -273,6 +276,68 @@ class StrategyEngine:
             strategy_id=self.session_tag,
         )
 
+    def _on_position_closed(
+        self,
+        pos: PositionState,
+        fill_price: float,
+        exit_reason: str,
+        exit_time: datetime,
+        exit_order_id: str = "",
+    ) -> None:
+        """Centralized post-trade reconciliation, orphan order cleanup & dynamic fund refresh.
+
+        Executes immediately whenever a position exits (Target, Stop-Loss, Trail, Flatten, Emergency):
+        1. Cancels and confirms terminal status for any lingering resting protective SL order
+           (preventing dangerous orphan orders from executing on Zerodha).
+        2. Immediately refreshes live broker margins via `get_margins(segment='commodity')`
+           to update the ledger balance, usable cash, and margin utilized.
+        3. Updates internal P&L accounting, consecutive loss counter (anti-churn circuit),
+           and records last exit timestamp for cooling off.
+        """
+        # 1. Prevent Orphan Orders: Ensure protective order is cancelled if still resting
+        if pos.protective_order_id and pos.protective_order_id != exit_order_id:
+            try:
+                sl_order = self.broker.get_order_status(pos.protective_order_id)
+                if sl_order and sl_order.status in (OrderStatus.OPEN, OrderStatus.TRIGGER_PENDING):
+                    logger.info("Cancelling lingering protective SL order %s for closed position %s", pos.protective_order_id, pos.symbol)
+                    self.broker.cancel_order(pos.protective_order_id)
+                    self._confirm_order_terminal(pos.protective_order_id, timeout_sec=1.5)
+            except Exception as ce:
+                logger.warning("Error cancelling protective order %s after position close for %s: %s", pos.protective_order_id, pos.symbol, ce)
+
+        # 2. Dynamic Fund & Margin Refresh straight from Zerodha Kite ledger
+        try:
+            fresh_margin = self.broker.get_margins(segment="commodity")
+            self._latest_margin_info = fresh_margin
+            logger.info(
+                "Post-trade ledger refresh for %s (%s): live_balance=INR %.2f, net_value=INR %.2f, used=INR %.2f",
+                pos.symbol,
+                exit_reason,
+                fresh_margin.equity_available,
+                fresh_margin.net_value,
+                fresh_margin.equity_used,
+            )
+        except Exception as me:
+            logger.warning("Failed to refresh broker margins immediately post-trade for %s: %s", pos.symbol, me)
+
+        # 3. Dynamic Trade P&L & Consecutive Loss Circuit Accounting
+        self._last_trade_exit_time = exit_time
+        gross_pnl = 0.0
+        if pos.average_entry > 0 and fill_price > 0 and (pos.quantity > 0 or getattr(pos, "requested_quantity", 0) > 0):
+            closed_qty = pos.quantity if pos.quantity > 0 else getattr(pos, "requested_quantity", 1)
+            lot_mult = get_mcx_lot_multiplier(pos.symbol)
+            if pos.side == Side.BUY:
+                gross_pnl = (fill_price - pos.average_entry) * closed_qty * lot_mult
+            else:
+                gross_pnl = (pos.average_entry - fill_price) * closed_qty * lot_mult
+
+        if gross_pnl < 0:
+            self._consecutive_losses = getattr(self, "_consecutive_losses", 0) + 1
+            logger.info("Trade closed at a loss (INR %.2f). Consecutive losses: %d", gross_pnl, self._consecutive_losses)
+        else:
+            self._consecutive_losses = 0
+            logger.info("Trade closed at a profit (INR %.2f). Consecutive losses reset to 0.", gross_pnl)
+
     def has_in_flight_orders(self) -> bool:
         """Return True if any managed position has orders in-flight or is unprotected."""
         for pos in self.state_machine.positions.values():
@@ -345,13 +410,18 @@ class StrategyEngine:
 
             backfilled_symbols: list[str] = []
             rebuilt_ors: list[str] = []
+            is_mcx = getattr(self.config, "exchange", "NSE").upper() == "MCX"
+            comex_start_t = time(17, 0) if is_us_dst(session_date) else time(18, 0)
+            comex_or_end_t = time(17, 30) if is_us_dst(session_date) else time(18, 30)
+            curr_sess_type = "COMEX" if (is_mcx and now.time() >= comex_start_t) else "MORNING"
+
             for sym in symbols:
                 try:
                     raw_c = self.broker.get_historical(sym, "5minute", hist_from_5m, now)
                     comp_c = self._filter_completed_candles(raw_c, now)
                     if comp_c:
                         backfilled_symbols.append(sym)
-                    or_obj = build_opening_range(sym, comp_c, session_date=session_date)
+                    or_obj = build_opening_range(sym, comp_c, session_date=session_date, session_type=curr_sess_type)
                     self.opening_ranges[sym] = or_obj
                     if or_obj.is_complete:
                         rebuilt_ors.append(sym)
@@ -567,6 +637,12 @@ class StrategyEngine:
         # STEP 11 (Priority): Manage Open Positions
         # -------------------------------------------------------------
         decisions: list[StrategyDecision] = []
+        is_mcx_conf = getattr(self.config, "exchange", "NSE").upper() == "MCX"
+        effective_target_r = (
+            max(float(getattr(self.config.stops, "target_r", 3.5)), 3.5)
+            if (is_mcx_conf and self.config.stops.trail_enabled)
+            else self.config.stops.target_r
+        )
 
         # Step 11.A: Reconcile pending entry orders (PositionPhase.ENTERING)
         entering_managed = [
@@ -599,7 +675,7 @@ class StrategyEngine:
                         side=ent_pos.side,
                         entry_price=ent_pos.average_entry,
                         initial_stop=ent_pos.initial_stop_price,
-                        target_r=self.config.stops.target_r,
+                        target_r=effective_target_r,
                         tick_size=tick,
                     )
 
@@ -715,7 +791,7 @@ class StrategyEngine:
                         side=ent_pos.side,
                         entry_price=ent_pos.average_entry,
                         initial_stop=ent_pos.initial_stop_price,
-                        target_r=self.config.stops.target_r,
+                        target_r=effective_target_r,
                         tick_size=tick,
                     )
 
@@ -811,7 +887,7 @@ class StrategyEngine:
                                 side=ent_pos.side,
                                 entry_price=ent_pos.average_entry,
                                 initial_stop=ent_pos.initial_stop_price,
-                                target_r=self.config.stops.target_r,
+                                target_r=effective_target_r,
                                 tick_size=tick,
                             )
 
@@ -894,6 +970,7 @@ class StrategyEngine:
                                 pos.phase = PositionPhase.CLOSED
                                 pos.quantity = 0
                                 fill_px = exit_state.average_price or pos.average_entry
+                                self._on_position_closed(pos, fill_px, "EXIT_ORDER_FILLED", now, pos.exit_order_id)
                                 self.journal.log_event(
                                     event_type="EXIT_ORDER_COMPLETED",
                                     symbol=pos.symbol,
@@ -1020,6 +1097,7 @@ class StrategyEngine:
                             logger.error("Error logging SL exit to trade_logger: %s", log_err)
                         pos.phase = PositionPhase.CLOSED
                         pos.quantity = 0
+                        self._on_position_closed(pos, fill_px, "STOP_LOSS_HIT", now, pos.protective_order_id)
                         decisions.append(
                             StrategyDecision(
                                 decision=Decision.EXIT,
@@ -1076,6 +1154,7 @@ class StrategyEngine:
                                 )
                                 pos.phase = PositionPhase.CLOSED
                                 pos.quantity = 0
+                                self._on_position_closed(pos, sl_st.average_price or pos.current_stop_price, "STOP_LOSS_HIT", now, pos.protective_order_id)
                                 decisions.append(
                                     StrategyDecision(
                                         decision=Decision.EXIT,
@@ -1243,6 +1322,7 @@ class StrategyEngine:
                             pos.phase = PositionPhase.CLOSED
                             pos.quantity = 0
                             fill_px = exit_state.average_price or current_price
+                            self._on_position_closed(pos, fill_px, "PRE_NEWS_PROTECTIVE_EXIT", now, exit_order_id)
                             try:
                                 self.trade_logger.record_exit(
                                     symbol=pos.symbol,
@@ -1355,6 +1435,7 @@ class StrategyEngine:
                             pos.phase = PositionPhase.CLOSED
                             pos.quantity = 0
                             fill_px = exit_state.average_price or pos.average_entry
+                            self._on_position_closed(pos, fill_px, "TARGET_HIT", now, exit_order_id)
                             try:
                                 self.trade_logger.record_exit(
                                     symbol=pos.symbol,
@@ -1464,13 +1545,14 @@ class StrategyEngine:
                                     trigger_price=trail_eval.trigger_price,
                                 )
                                 if mod_ok:
+                                    prev_stop = pos.current_stop_price
                                     pos.current_stop_price = trail_eval.proposed_stop
                                     pos.stop_modification_count += 1
                                     broker_action = f"MODIFIED_STOP_{trail_eval.proposed_stop}"
                                     self.journal.log_stop_change(
                                         symbol=pos.symbol,
                                         side=pos.side.value,
-                                        previous_stop=pos.current_stop_price,
+                                        previous_stop=prev_stop,
                                         new_stop=trail_eval.proposed_stop,
                                         reason=trail_eval.reason,
                                         r_multiple=trail_eval.r_multiple,
@@ -1581,6 +1663,7 @@ class StrategyEngine:
                                             )
                                             pos.phase = PositionPhase.CLOSED
                                             pos.quantity = 0
+                                            self._on_position_closed(pos, mod_st.average_price or pos.current_stop_price, "STOP_LOSS_HIT", now, pos.protective_order_id)
                                             decisions.append(
                                                 StrategyDecision(
                                                     decision=Decision.EXIT,
@@ -1665,10 +1748,11 @@ class StrategyEngine:
                 mark = self.broker.get_quote(position.symbol)
                 if not mark.is_fresh or mark.last_price <= 0:
                     raise ValueError(f"Missing or stale mark for {position.symbol}")
+                lot_mult = get_mcx_lot_multiplier(position.symbol)
                 unrealized = (
-                    (mark.last_price - position.average_entry) * qty
+                    (mark.last_price - position.average_entry) * qty * lot_mult
                     if pos_side == Side.BUY
-                    else (position.average_entry - mark.last_price) * qty
+                    else (position.average_entry - mark.last_price) * qty * lot_mult
                 )
                 managed_pos = self.state_machine.positions.get(position.symbol)
                 prot_stop = (
@@ -1941,7 +2025,9 @@ class StrategyEngine:
         session_date = (now if now.tzinfo else now.replace(tzinfo=IST)).astimezone(IST).date()
         now_t = self._ensure_ist(now).time()
         is_mcx = getattr(self.config, "exchange", "NSE").upper() == "MCX"
-        curr_sess_type = "COMEX" if (is_mcx and now_t >= time(17, 0)) else "MORNING"
+        comex_start_t = time(17, 0) if is_us_dst(session_date) else time(18, 0)
+        comex_or_end_t = time(17, 30) if is_us_dst(session_date) else time(18, 30)
+        curr_sess_type = "COMEX" if (is_mcx and now_t >= comex_start_t) else "MORNING"
 
         for sym in symbols:
             # Skip if already open or in flight
@@ -1962,6 +2048,16 @@ class StrategyEngine:
                 built_or = build_opening_range(sym, s_candles, session_date=session_date, session_type=curr_sess_type)
                 if built_or.is_complete or built_or.candle_count > 0:
                     self.opening_ranges[sym] = built_or
+
+        if is_mcx and comex_start_t <= now_t < comex_or_end_t:
+            return decisions + [
+                StrategyDecision(
+                    decision=Decision.WAIT,
+                    timestamp_ist=now,
+                    reason_codes=["BUILDING_COMEX_OPENING_RANGE"],
+                    explanation=f"Building COMEX opening range ({comex_start_t.strftime('%H:%M')} - {comex_or_end_t.strftime('%H:%M')} IST)",
+                )
+            ]
 
         # 2. Batch-fetch quotes IMMEDIATELY AFTER historical pre-warm so quotes are ultra-fresh (< 0.2s old)
         all_symbols_to_quote = [self.config.regime.benchmark_symbol] + [s for s in symbols if s != self.config.regime.benchmark_symbol]
@@ -2073,16 +2169,25 @@ class StrategyEngine:
             # Late-Start First-Scan Catch-Up Evaluation:
             # If the engine started late (e.g., 09:50 IST) and the latest bar is WAIT, scan earlier
             # post-OR bars of today once per session to catch valid earlier breakouts or reject stale ones.
-            if sym not in self._late_start_catchup_done:
-                self._late_start_catchup_done.add(sym)
+            inst_exch = getattr(inst, "exchange", None)
+            is_sym_mcx = (inst_exch == "MCX") or any(sym.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS")) or (is_mcx and inst_exch != "NSE")
+            catchup_key = f"{sym}_{curr_sess_type}"
+            if catchup_key not in self._late_start_catchup_done:
+                self._late_start_catchup_done.add(catchup_key)
                 now_ist_time = self._ensure_ist(now).time()
-                if sig.decision == Decision.WAIT and now_ist_time >= time(9, 40):
+                or_end_time = comex_or_end_t if (curr_sess_type == "COMEX" and is_sym_mcx) else (time(9, 15) if is_sym_mcx else time(9, 30))
+                catchup_eligible_time = (
+                    (datetime.combine(session_date, comex_or_end_t) + timedelta(minutes=10)).time()
+                    if (curr_sess_type == "COMEX" and is_sym_mcx)
+                    else (time(9, 25) if is_sym_mcx else time(9, 40))
+                )
+                if sig.decision == Decision.WAIT and now_ist_time >= catchup_eligible_time:
                     comp_c = [c for c in stock_candles if c.is_complete] or stock_candles
                     if len(comp_c) >= 2:
                         for idx in range(len(comp_c) - 2, -1, -1):
                             cand_bar = comp_c[idx]
                             cand_ts = self._ensure_ist(cand_bar.timestamp)
-                            if cand_ts.date() != session_date or cand_ts.time() < time(9, 30):
+                            if cand_ts.date() != session_date or cand_ts.time() < or_end_time:
                                 break
                             sub_stock = comp_c[: idx + 1]
                             sub_bench = [bc for bc in bench_candles if self._ensure_ist(bc.timestamp) <= cand_ts] or bench_candles
@@ -2313,9 +2418,15 @@ class StrategyEngine:
                 tick_size=inst.tick_size,
             )
 
-            # Gate 9 Stop-width bounds: 0.55% <= R% <= 0.90%
-            min_stop_pct = getattr(self.config.signal, "min_stop_distance_pct", 0.0055)
-            max_stop_pct = getattr(self.config.signal, "max_stop_distance_pct", 0.0090)
+            # Gate 9 Stop-width bounds: 0.18% <= R% <= 0.65% for MCX; 0.55% <= R% <= 0.90% for Equity
+            inst_exch = getattr(inst, "exchange", None)
+            is_sym_mcx = (inst_exch == "MCX") or any(sym.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS")) or (is_mcx and inst_exch != "NSE")
+            if is_sym_mcx:
+                min_stop_pct = getattr(self.config.signal, "mcx_min_stop_distance_pct", 0.0018)
+                max_stop_pct = getattr(self.config.signal, "mcx_max_stop_distance_pct", 0.0065)
+            else:
+                min_stop_pct = getattr(self.config.signal, "min_stop_distance_pct", 0.0055)
+                max_stop_pct = getattr(self.config.signal, "max_stop_distance_pct", 0.0090)
             stop_dist_pct = abs(entry_price - initial_stop) / entry_price if entry_price > 0 else 0.0
             if stop_dist_pct < min_stop_pct or stop_dist_pct > max_stop_pct:
                 decisions.append(
@@ -2332,6 +2443,11 @@ class StrategyEngine:
             # Late-Start & Stale-Signal Validity Gate:
             # If the trigger bar closed more than 5 minutes before `now`, validate that price is still
             # within slip_pct of signal_price, stop-loss was not hit, and target was not hit.
+            effective_target_r = (
+                max(float(getattr(self.config.stops, "target_r", 3.5)), 3.5)
+                if (is_sym_mcx and self.config.stops.trail_enabled)
+                else self.config.stops.target_r
+            )
             if completed_stock_candles:
                 trig_bar = completed_stock_candles[-1]
                 trig_ts = self._ensure_ist(trig_bar.timestamp)
@@ -2341,7 +2457,7 @@ class StrategyEngine:
                         side=side,
                         entry_price=entry_price,
                         initial_stop=initial_stop,
-                        target_r=self.config.stops.target_r,
+                        target_r=effective_target_r,
                         tick_size=tick,
                     )
                     or_obj = self.opening_ranges.get(sym)
@@ -2379,7 +2495,7 @@ class StrategyEngine:
                 symbol=sym,
                 exchange=getattr(self.config, "exchange", "MCX"),
                 side=side,
-                quantity=100,
+                quantity=max(1, getattr(inst, "order_lot_size", 1)),
                 price=entry_price,
                 product=Product.MIS,
                 order_type=OrderType.LIMIT,
@@ -2582,7 +2698,7 @@ class StrategyEngine:
                     side=side,
                     entry_price=marketable_entry_price,
                     initial_stop=initial_stop,
-                    target_r=self.config.stops.target_r,
+                    target_r=effective_target_r,
                     tick_size=inst.tick_size,
                 )
 
@@ -2911,8 +3027,8 @@ def select_best_entries_for_bar(
     acc_cfg = cfg.get("account", {})
     risk_cfg = cfg.get("risk_management", cfg.get("risk", {}))
 
-    # Check Daily Loss Limit (-₹240 on ₹15,000 capital)
-    starting_cap = float(acc_cfg.get("starting_capital", 15000.0))
+    # Check Dynamic Daily Loss Limit against active capital
+    starting_cap = float(acc_cfg.get("live_capital", acc_cfg.get("starting_capital", 15000.0)))
     daily_loss_pct = float(risk_cfg.get("daily_loss_limit_pct", 0.0160))
     if daily_loss_pct > 0.1:
         daily_loss_pct /= 100.0

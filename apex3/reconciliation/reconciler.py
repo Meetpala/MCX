@@ -150,8 +150,10 @@ class Reconciler:
                 raw_limit = min(raw_limit, upper_c)
             limit_px = ceil_to_tick(raw_limit, tick)
 
+        exch = getattr(inst, "exchange", None) or getattr(self.config, "exchange", "MCX")
         return OrderRequest(
             symbol=symbol,
+            exchange=exch,
             side=side,
             quantity=quantity,
             product=Product.MIS,
@@ -166,14 +168,18 @@ class Reconciler:
         if pos.quantity <= 0:
             return False
         from apex3.strategy.trail import calculate_stop_limit_prices, round_to_tick
-        t = tick_size if (tick_size and tick_size > 0) else 0.05
+        inst = self.broker.get_instrument_info(pos.symbol)
+        exch = getattr(inst, "exchange", None) or getattr(self.config, "exchange", "MCX")
+        is_mcx = exch.upper() == "MCX" or any(pos.symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS"))
+        t = float(inst.tick_size) if (inst and getattr(inst, "tick_size", None) and inst.tick_size > 0) else (tick_size if (tick_size and tick_size > 0) else 0.05)
         stop_px = pos.current_stop_price if pos.current_stop_price > 0 else pos.initial_stop_price
         if stop_px <= 0 and pos.average_entry > 0:
-            # Fallback 0.70% structural stop within Gate 9 sweet spot [0.55%, 0.90%]
+            # Fallback 0.35% for MCX bullion sweet spot [0.18%, 0.65%]; 0.70% for equity [0.55%, 0.90%]
+            fallback_stop_pct = 0.0035 if is_mcx else 0.0070
             if pos.side == Side.BUY:
-                stop_px = round_to_tick(pos.average_entry * (1.0 - 0.0070), tick_size=t, round_up=False)
+                stop_px = round_to_tick(pos.average_entry * (1.0 - fallback_stop_pct), tick_size=t, round_up=False)
             else:
-                stop_px = round_to_tick(pos.average_entry * (1.0 + 0.0070), tick_size=t, round_up=True)
+                stop_px = round_to_tick(pos.average_entry * (1.0 + fallback_stop_pct), tick_size=t, round_up=True)
             pos.initial_stop_price = stop_px
             pos.current_stop_price = stop_px
             pos.r_value = abs(pos.average_entry - stop_px)
@@ -210,6 +216,7 @@ class Reconciler:
         exit_side = Side.SELL if pos.side == Side.BUY else Side.BUY
         sl_req = OrderRequest(
             symbol=pos.symbol,
+            exchange=exch,
             side=exit_side,
             quantity=pos.quantity,
             product=Product.MIS,

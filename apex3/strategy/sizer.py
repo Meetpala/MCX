@@ -469,19 +469,25 @@ class PositionSizeResult:
     estimated_roundtrip_charges_inr: float
 
 
-def fetch_zerodha_live_capital(kite_client, fallback_capital: float) -> float:
+def fetch_zerodha_live_capital(kite_client, fallback_capital: float, segment: str = "commodity") -> float:
     """
     Automatically fetches available live cash margin from Zerodha Kite Connect.
-    Falls back to config starting_capital during backtests.
+    Checks the designated segment (defaults to 'commodity' for MCX),
+    falling back to 'equity' if commodity balance is zero or unallocated.
+    Falls back to config starting_capital during offline backtests.
     """
     if kite_client is None:
         return fallback_capital
-    try:
-        margins = kite_client.margins(segment="equity")
-        live_balance = float(margins["available"]["live_balance"])
-        return live_balance if live_balance > 0 else fallback_capital
-    except Exception:
-        return fallback_capital
+    for seg in (segment, "commodity", "equity"):
+        try:
+            margins = kite_client.margins(segment=seg)
+            avail = margins.get("available", {})
+            live_balance = float(avail.get("live_balance", margins.get("net", 0.0)))
+            if live_balance > 0:
+                return live_balance
+        except Exception:
+            continue
+    return fallback_capital
 
 
 
@@ -533,7 +539,8 @@ def calculate_position_size(
     margin_req = round(notional / leverage, 2)
     planned_risk = round(quantity * risk_per_share, 2)
 
-    est_charges = calculate_zerodha_intraday_charges(entry_price, target_price, quantity, exchange="NSE")
+    exchange = cfg.get("asset_exchange", "NSE") if isinstance(cfg, dict) else "NSE"
+    est_charges = calculate_zerodha_intraday_charges(entry_price, target_price, quantity, exchange=exchange)
     expected_gross_win = abs(target_price - entry_price) * quantity
 
     # Reject trade if Zerodha charges consume > 18% of expected 2.0R gross profit

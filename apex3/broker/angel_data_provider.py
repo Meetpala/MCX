@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -151,13 +152,10 @@ def resolve_active_mcx_futures(
             matched = False
             if name == clean_root:
                 matched = True
-            elif symbol.startswith(clean_root):
-                longer_matches = [
-                    k for k in MCX_LOT_MULTIPLIERS
-                    if len(k) > len(clean_root) and symbol.startswith(k)
-                ]
-                if not longer_matches:
-                    matched = True
+            elif re.match(rf"^{re.escape(clean_root)}\d{{2}}[A-Z]{{3}}\d{{2}}FUT$", symbol):
+                # Root must be immediately followed by the DDMMMYY expiry, so that
+                # SILVER never matches SILVER100/SILVERM/SILVERMIC and GOLD never matches GOLDM/GOLDTEN.
+                matched = True
 
             if matched:
                 exp = parse_expiry_date(item.get("expiry") or item.get("tradingsymbol") or item.get("symbol"))

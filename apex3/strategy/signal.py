@@ -394,7 +394,7 @@ def evaluate_aurum_signal(
     atr_series = compute_atr(highs, lows, closes, period=14)
     atr14 = atr_series[-1] if atr_series else max(latest_bar.high - latest_bar.low, 1.0)
     ema_series = compute_ema(closes, period=20)
-    ema20 = ema_series[-1] if ema_series else signal_price
+    ema20 = ema_series[-1] if ema_series else (sum(closes) / len(closes) if closes else signal_price)
 
     stock_vwap, sigma_vwap = calculate_session_anchored_vwap(completed)
     bar_range = max(latest_bar.high - latest_bar.low, 1.0)
@@ -404,6 +404,12 @@ def evaluate_aurum_signal(
     prior_vols = [c.volume for c in completed[-21:-1]]
     avg_vol = sum(prior_vols) / max(1, len(prior_vols)) if prior_vols else 1.0
     rvol = latest_bar.volume / avg_vol if avg_vol > 0 else 1.0
+
+    # 10-bar Momentum Return for Conviction Scoring
+    mom_10_pct = ((closes[-1] - closes[-10]) / closes[-10]) * 100.0 if len(closes) >= 10 else 0.50
+    rs_val = mom_10_pct if target_side == Side.BUY else -mom_10_pct
+    if abs(rs_val) < 0.10:
+        rs_val = 0.50 if target_side == Side.BUY else -0.50
 
     # Bullion SMT Divergence Check
     smt_type = None
@@ -421,8 +427,11 @@ def evaluate_aurum_signal(
             min_sweep_low = min(latest_bar.low, completed[-2].low if len(completed) >= 2 else latest_bar.low)
             sweep_depth = (opening_range.low - min_sweep_low) / max(0.1, atr14)
             if 0.10 <= sweep_depth <= 0.65:
-                reclaimed = (signal_price >= opening_range.low + 0.10 * atr14) and (signal_price > opening_range.low or signal_price > ema20 or signal_price > stock_vwap)
-                smt_ok = (smt_type == "BULLISH_SMT") or (market_regime == MarketRegime.BULLISH)
+                has_smt = (smt_type == "BULLISH_SMT")
+                reclaimed = (signal_price >= opening_range.low + 0.10 * atr14) and (
+                    (signal_price > stock_vwap or signal_price > ema20) if not has_smt else (signal_price > opening_range.low)
+                )
+                smt_ok = has_smt or (rvol >= 2.0 and (signal_price > stock_vwap or signal_price > ema20))
                 if reclaimed and clv_buy >= 0.70 and rvol >= 1.50 and smt_ok:
                     res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook B Bullish Sweep Reclaim passed")]
                     return SignalEvaluation(
@@ -435,6 +444,7 @@ def evaluate_aurum_signal(
                         or_low=opening_range.low,
                         vwap=stock_vwap,
                         relative_volume=rvol,
+                        relative_strength=rs_val,
                         playbook="SWEEP_RECLAIM",
                         reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_B_SWEEP_RECLAIM"],
                         explanation=f"Playbook B Liquidity Sweep Reclaim: Swept OR low by {sweep_depth:.2f}x ATR, reclaimed VWAP/EMA20 (CLV={clv_buy:.2f}, RVOL={rvol:.2f}x, SMT={smt_type})",
@@ -446,8 +456,11 @@ def evaluate_aurum_signal(
             max_sweep_high = max(latest_bar.high, completed[-2].high if len(completed) >= 2 else latest_bar.high)
             sweep_depth = (max_sweep_high - opening_range.high) / max(0.1, atr14)
             if 0.10 <= sweep_depth <= 0.65:
-                reclaimed = (signal_price <= opening_range.high - 0.10 * atr14) and (signal_price < opening_range.high or signal_price < ema20 or signal_price < stock_vwap)
-                smt_ok = (smt_type == "BEARISH_SMT") or (market_regime == MarketRegime.BEARISH)
+                has_smt = (smt_type == "BEARISH_SMT")
+                reclaimed = (signal_price <= opening_range.high - 0.10 * atr14) and (
+                    (signal_price < stock_vwap or signal_price < ema20) if not has_smt else (signal_price < opening_range.high)
+                )
+                smt_ok = has_smt or (rvol >= 2.0 and (signal_price < stock_vwap or signal_price < ema20))
                 if reclaimed and clv_sell >= 0.70 and rvol >= 1.50 and smt_ok:
                     res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook B Bearish Sweep Upthrust passed")]
                     return SignalEvaluation(
@@ -460,6 +473,7 @@ def evaluate_aurum_signal(
                         or_low=opening_range.low,
                         vwap=stock_vwap,
                         relative_volume=rvol,
+                        relative_strength=rs_val,
                         playbook="SWEEP_RECLAIM",
                         reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_B_SWEEP_UPTHRUST"],
                         explanation=f"Playbook B Liquidity Sweep Upthrust: Swept OR high by {sweep_depth:.2f}x ATR, rejected below VWAP/EMA20 (CLV={clv_sell:.2f}, RVOL={rvol:.2f}x, SMT={smt_type})",
@@ -473,7 +487,14 @@ def evaluate_aurum_signal(
         # Trigger A1: OR Breakout
         effective_band = max(sigma_vwap, 0.75 * atr14)
         not_overextended = (sigma_vwap <= 0) or (signal_price <= stock_vwap + 1.85 * effective_band)
-        if signal_price >= opening_range.high + cushion and clv_buy >= 0.70 and rvol >= 1.50 and not_overextended:
+        if (
+            signal_price >= opening_range.high + cushion
+            and clv_buy >= 0.70
+            and rvol >= 1.50
+            and not_overextended
+            and signal_price > stock_vwap
+            and signal_price > ema20
+        ):
             res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakout passed")]
             return SignalEvaluation(
                 symbol=symbol,
@@ -485,6 +506,7 @@ def evaluate_aurum_signal(
                 or_low=opening_range.low,
                 vwap=stock_vwap,
                 relative_volume=rvol,
+                relative_strength=rs_val,
                 playbook="TREND",
                 reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A1_OR_BREAKOUT"],
                 explanation=f"Playbook A1 Trend Breakout: C={signal_price:.2f} >= OR_H+cushion ({opening_range.high + cushion:.2f}), CLV={clv_buy:.2f}, RVOL={rvol:.2f}x",
@@ -511,6 +533,7 @@ def evaluate_aurum_signal(
                     or_low=opening_range.low,
                     vwap=stock_vwap,
                     relative_volume=rvol,
+                    relative_strength=rs_val,
                     playbook="TREND",
                     reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A2_PULLBACK_CONTINUATION"],
                     explanation=f"Playbook A2 Pullback Continuation: Retested EMA20/VWAP+0.35SD and resumed > H_prev (CLV={clv_buy:.2f}, RVOL={rvol:.2f}x)",
@@ -520,7 +543,14 @@ def evaluate_aurum_signal(
         # Trigger A1: OR Breakdown
         effective_band = max(sigma_vwap, 0.75 * atr14)
         not_overextended = (sigma_vwap <= 0) or (signal_price >= stock_vwap - 1.85 * effective_band)
-        if signal_price <= opening_range.low - cushion and clv_sell >= 0.70 and rvol >= 1.50 and not_overextended:
+        if (
+            signal_price <= opening_range.low - cushion
+            and clv_sell >= 0.70
+            and rvol >= 1.50
+            and not_overextended
+            and signal_price < stock_vwap
+            and signal_price < ema20
+        ):
             res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakdown passed")]
             return SignalEvaluation(
                 symbol=symbol,
@@ -532,6 +562,7 @@ def evaluate_aurum_signal(
                 or_low=opening_range.low,
                 vwap=stock_vwap,
                 relative_volume=rvol,
+                relative_strength=rs_val,
                 playbook="TREND",
                 reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A1_OR_BREAKDOWN"],
                 explanation=f"Playbook A1 Trend Breakdown: C={signal_price:.2f} <= OR_L-cushion ({opening_range.low - cushion:.2f}), CLV={clv_sell:.2f}, RVOL={rvol:.2f}x",
@@ -558,6 +589,7 @@ def evaluate_aurum_signal(
                     or_low=opening_range.low,
                     vwap=stock_vwap,
                     relative_volume=rvol,
+                    relative_strength=rs_val,
                     playbook="TREND",
                     reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A2_PULLBACK_CONTINUATION"],
                     explanation=f"Playbook A2 Bearish Pullback Continuation: Bounced into EMA20/VWAP-0.35SD and resumed < L_prev (CLV={clv_sell:.2f}, RVOL={rvol:.2f}x)",
@@ -573,6 +605,7 @@ def evaluate_aurum_signal(
         or_low=opening_range.low,
         vwap=stock_vwap,
         relative_volume=rvol,
+        relative_strength=rs_val,
         reason_codes=["NO_SETUP_TRIGGERED"],
         explanation=f"Neither Playbook A nor Playbook B triggered for {symbol} at {signal_price:.2f}",
     )

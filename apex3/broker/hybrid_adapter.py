@@ -47,8 +47,17 @@ class HybridBrokerAdapter(BrokerInterface):
 
     # ── Market Data (Delegated to Angel One SmartAPI) ────────────────
 
-    def get_quote(self, symbol: str, exchange: str = "NSE") -> Quote:
+    def _infer_exchange(self, symbol: str, exchange: Optional[str] = None) -> str:
+        """Infer exchange accurately, prioritizing MCX for commodity symbols."""
+        if exchange and exchange != "NSE":
+            return exchange
+        if any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "MCX")):
+            return "MCX"
+        return exchange or "NSE"
+
+    def get_quote(self, symbol: str, exchange: Optional[str] = None) -> Quote:
         """Fetch live quote from Angel One free data feed."""
+        exchange = self._infer_exchange(symbol, exchange)
         q = self.data_provider.get_quote(symbol=symbol, exchange=exchange)
         from apex3.broker.paper import PaperBroker
         if isinstance(self.execution_broker, PaperBroker) and q is not None:
@@ -57,12 +66,14 @@ class HybridBrokerAdapter(BrokerInterface):
             self.execution_broker.set_quote(q)
         return q
 
-    def get_quotes_batch(self, symbols: list[str], exchange: str = "NSE") -> dict[str, Quote]:
+    def get_quotes_batch(self, symbols: list[str], exchange: Optional[str] = None) -> dict[str, Quote]:
         """Fetch batch quotes from Angel One free data feed in a single snapshot."""
+        first_sym = symbols[0] if symbols else ""
+        exchange = self._infer_exchange(first_sym, exchange)
         if hasattr(self.data_provider, "get_quotes_batch"):
             batch = self.data_provider.get_quotes_batch(symbols, exchange=exchange)
         else:
-            batch = {sym: self.data_provider.get_quote(sym, exchange=exchange) for sym in symbols}
+            batch = {sym: self.data_provider.get_quote(sym, exchange=self._infer_exchange(sym, exchange)) for sym in symbols}
         from apex3.broker.paper import PaperBroker
         if isinstance(self.execution_broker, PaperBroker) and isinstance(batch, dict):
             for sym, q in batch.items():
@@ -78,9 +89,10 @@ class HybridBrokerAdapter(BrokerInterface):
         interval: str,
         from_dt: datetime,
         to_dt: datetime,
-        exchange: str = "NSE",
+        exchange: Optional[str] = None,
     ) -> list[Candle]:
         """Fetch historical candles from Angel One free data feed."""
+        exchange = self._infer_exchange(symbol, exchange)
         return self.data_provider.get_historical(
             symbol=symbol,
             interval=interval,
@@ -91,15 +103,15 @@ class HybridBrokerAdapter(BrokerInterface):
 
     def get_instrument_info(self, symbol: str, exchange: Optional[str] = None) -> InstrumentInfo:
         """Fetch instrument info, using execution broker for execution metadata and data provider for streaming/circuits."""
-        if exchange is None:
-            exchange = "MCX" if any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS")) else "NSE"
+        exchange = self._infer_exchange(symbol, exchange)
 
         # If symbol is a bare commodity root (e.g. SILVERMIC), attempt resolving to active dated contract
         if exchange == "MCX" and symbol.upper() in ("SILVERMIC", "GOLDGUINEA", "GOLDTEN", "SILVERM", "GOLDM", "SILVER", "GOLD"):
             try:
                 resolved_map = self.resolve_active_mcx_futures([symbol.upper()])
                 if symbol.upper() in resolved_map:
-                    symbol = resolved_map[symbol.upper()]
+                    res_obj = resolved_map[symbol.upper()]
+                    symbol = res_obj.symbol if hasattr(res_obj, "symbol") else str(res_obj)
             except Exception as re:
                 logger.debug("Could not resolve root %s to dated contract: %s", symbol, re)
 

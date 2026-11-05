@@ -804,7 +804,8 @@ class KiteAdapter(BrokerInterface):
             try:
                 resolved_map = self.resolve_active_mcx_futures([symbol])
                 if symbol in resolved_map:
-                    dated_sym = resolved_map[symbol]
+                    resolved_val = resolved_map[symbol]
+                    dated_sym = resolved_val.symbol if hasattr(resolved_val, "symbol") else str(resolved_val)
                     inst = self._get_instruments(exchange).get(dated_sym)
                     if inst:
                         symbol = dated_sym

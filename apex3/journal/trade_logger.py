@@ -228,17 +228,20 @@ class TradeLogger:
         projected_gain = per_share_risk * 2.0 * quantity if per_share_risk > 0 else (risk_rupees * 2.0 if risk_rupees > 0 else 0.0)
         calc_risk = per_share_risk * quantity if per_share_risk > 0 else risk_rupees
 
+        exch_str = "MCX" if any(k in symbol.upper() for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")) else "NSE"
+        qty_unit = "lots" if exch_str == "MCX" else "shares"
+
         entry_block = (
             "================================================================================\n"
             f"[{ts_str}] TRADE EXECUTION — ENTRY FILLED\n"
             f"[RECORD_ID: {unique_id}]\n"
             "--------------------------------------------------------------------------------\n"
-            f"Symbol          : {symbol} (NSE)\n"
+            f"Symbol          : {symbol} ({exch_str})\n"
             f"Action / Side   : {side_str}\n"
-            f"Quantity Filled : {quantity} shares (MIS Intraday, 4.0x Leverage)\n"
+            f"Quantity Filled : {quantity} {qty_unit} (MIS Intraday, Dynamic Leverage)\n"
             f"Execution Price : Rs. {price:,.2f}\n"
             f"Notional Value  : Rs. {notional:,.2f}\n"
-            f"Margin Blocked  : Rs. {margin_est:,.2f} (~{margin_est / 15000.0 * 100:.1f}% of starting capital)\n"
+            f"Margin Blocked  : Rs. {margin_est:,.2f}\n"
             f"Order ID        : {order_id or 'N/A'}\n"
             f"Trade ID        : {trade_id or 'N/A'}\n"
             f"Entry Time (IST): {ts_str}\n"

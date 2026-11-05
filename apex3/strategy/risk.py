@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from apex3.config import LimitsConfig, RiskConfig
-from apex3.models import GateResult, GateStatus, MarginInfo, PositionState
+from apex3.models import GateResult, GateStatus, MarginInfo, PositionState, get_mcx_lot_multiplier
 
 
 @dataclass(frozen=True)
@@ -41,20 +41,21 @@ class PortfolioRiskStatus:
 def calculate_position_risk(position: PositionState) -> float:
     """Calculate open stop-distance rupee risk for an existing position.
 
-    Risk = Quantity * abs(Current_Stop - Average_Entry)
+    Risk = Quantity * Multiplier * abs(Current_Stop - Average_Entry)
     If stop has trailed past entry into profit, risk is 0.0.
     """
     if position.quantity <= 0 or position.protective_stop_price <= 0:
         return 0.0
 
+    lot_mult = getattr(position, "lot_multiplier", 1) or get_mcx_lot_multiplier(position.symbol)
     if position.side.value == "BUY":
         if position.protective_stop_price >= position.average_entry:
             return 0.0  # Stop has locked profit / break-even
-        return position.quantity * (position.average_entry - position.protective_stop_price)
+        return position.quantity * lot_mult * (position.average_entry - position.protective_stop_price)
     else:  # SELL
         if position.protective_stop_price <= position.average_entry:
             return 0.0  # Short stop locked profit / break-even
-        return position.quantity * (position.protective_stop_price - position.average_entry)
+        return position.quantity * lot_mult * (position.protective_stop_price - position.average_entry)
 
 
 def evaluate_portfolio_risk(
