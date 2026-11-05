@@ -2404,6 +2404,7 @@ def test_schedule_0930_to_0935_and_special_session_display():
     from apex3.strategy.schedule import SessionScheduler, SessionState
     from apex3.strategy.signal import build_opening_range
     cfg = load_config()
+    object.__setattr__(cfg.schedule, "exchange", "NSE")
     sched = SessionScheduler(cfg.schedule)
 
     # At 09:32 IST on a regular trading Friday, state must be OPENING_RANGE (waiting for 09:35 entry_start), NOT POST_CLOSE

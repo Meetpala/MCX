@@ -34,6 +34,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+# Silence third-party network loggers to prevent leaking auth headers/keys
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("SmartApi").setLevel(logging.WARNING)
+
 logger = logging.getLogger("apex3.main")
 
 _LOCK_HANDLE = None
@@ -205,9 +210,17 @@ def run_app():
     engine = StrategyEngine(config=config, broker=broker, journal=journal, trade_logger=trade_logger)
 
     if config.exchange.upper() == "MCX":
-        mcx_universe = [item.symbol_root for item in config.universe.core_watchlist] or ["SILVERMIC", "GOLDGUINEA", "GOLDTEN"]
-        engine.set_manual_symbols(mcx_universe)
-        logger.info("AURUM-APEX MCX Engine Activated: Scanned watchlist set to %s", mcx_universe)
+        mcx_roots = [item.symbol_root for item in config.universe.core_watchlist] or ["SILVERMIC", "GOLDGUINEA", "GOLDTEN"]
+        resolved_symbols = list(mcx_roots)
+        if hasattr(broker, "resolve_active_mcx_futures"):
+            try:
+                active_map = broker.resolve_active_mcx_futures(mcx_roots)
+                resolved_symbols = [active_map.get(r, r) for r in mcx_roots]
+                logger.info("Resolved MCX root symbols to active dated contracts: %s", active_map)
+            except Exception as res_e:
+                logger.warning("Could not resolve active MCX futures at startup (using roots): %s", res_e)
+        engine.set_manual_symbols(resolved_symbols)
+        logger.info("AURUM-APEX MCX Engine Activated: Scanned watchlist set to %s", resolved_symbols)
 
     if config.mode == "live":
         if broker.is_session_valid():

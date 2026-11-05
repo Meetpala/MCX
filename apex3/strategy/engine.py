@@ -50,6 +50,7 @@ from apex3.models import (
     StrategyDecision,
     make_broker_tag,
 )
+from apex3.indicators.ema import compute_ema
 from apex3.reconciliation.reconciler import Reconciler
 from apex3.reconciliation.state_machine import PositionPhase, StateMachine
 from apex3.strategy.accounting import build_session_pnl
@@ -1938,6 +1939,10 @@ class StrategyEngine:
         stock_candles_map: dict[str, list[Candle]] = {}
         inst_map: dict[str, InstrumentInfo] = {}
         session_date = (now if now.tzinfo else now.replace(tzinfo=IST)).astimezone(IST).date()
+        now_t = self._ensure_ist(now).time()
+        is_mcx = getattr(self.config, "exchange", "NSE").upper() == "MCX"
+        curr_sess_type = "COMEX" if (is_mcx and now_t >= time(17, 0)) else "MORNING"
+
         for sym in symbols:
             # Skip if already open or in flight
             if any(
@@ -1949,8 +1954,12 @@ class StrategyEngine:
             s_candles = self.broker.get_historical(sym, "5minute", hist_from_5m, now)
             stock_candles_map[sym] = s_candles
             # Pre-build/cache opening range so late starts (e.g. 09:50 IST) reconstruct immediately
-            if s_candles and (sym not in self.opening_ranges or not self.opening_ranges[sym].is_complete):
-                built_or = build_opening_range(sym, s_candles, session_date=session_date)
+            if s_candles and (
+                sym not in self.opening_ranges
+                or not self.opening_ranges[sym].is_complete
+                or getattr(self.opening_ranges[sym], "session_type", "MORNING") != curr_sess_type
+            ):
+                built_or = build_opening_range(sym, s_candles, session_date=session_date, session_type=curr_sess_type)
                 if built_or.is_complete or built_or.candle_count > 0:
                     self.opening_ranges[sym] = built_or
 
@@ -1968,7 +1977,7 @@ class StrategyEngine:
         regime_eval = evaluate_market_regime(bench_candles, self.config.regime, bench_quote)
         self.latest_regime_eval = regime_eval
 
-        if regime_eval.regime == MarketRegime.NEUTRAL:
+        if regime_eval.regime == MarketRegime.NEUTRAL and not is_mcx:
             if not decisions:
                 decisions.append(
                     StrategyDecision(
@@ -2011,9 +2020,38 @@ class StrategyEngine:
 
             # Build/retrieve opening range
             or_range = self.opening_ranges.get(sym)
-            if or_range is None or not or_range.is_complete:
-                or_range = build_opening_range(sym, stock_candles, session_date=session_date)
+            if (
+                or_range is None
+                or not or_range.is_complete
+                or getattr(or_range, "session_type", "MORNING") != curr_sess_type
+            ):
+                or_range = build_opening_range(sym, stock_candles, session_date=session_date, session_type=curr_sess_type)
                 self.opening_ranges[sym] = or_range
+
+            # For MCX Bullion, derive commodity-specific trend if broad equity benchmark is neutral/closed
+            sym_regime = regime_eval.regime
+            if is_mcx and sym_regime in (MarketRegime.NEUTRAL, MarketRegime.WAITING):
+                comp_s = [c for c in stock_candles if getattr(c, "is_complete", True)]
+                if len(comp_s) >= 10:
+                    from apex3.strategy.regime import calculate_session_anchored_vwap
+                    c_closes = [c.close for c in comp_s]
+                    c_ema20 = compute_ema(c_closes, 20)[-1] if len(c_closes) >= 20 else c_closes[-1]
+                    c_vwap, _ = calculate_session_anchored_vwap(comp_s)
+                    c_price = comp_s[-1].close
+                    if c_price > c_ema20 and c_price > c_vwap:
+                        sym_regime = MarketRegime.BULLISH
+                    elif c_price < c_ema20 and c_price < c_vwap:
+                        sym_regime = MarketRegime.BEARISH
+
+            # Identify sibling bullion candles (Gold vs Silver) for SMT divergence
+            sibling_candles = None
+            if is_mcx:
+                is_silver = "SILVER" in sym.upper()
+                sibling_prefix = "GOLD" if is_silver else "SILVER"
+                for other_sym, other_candles in stock_candles_map.items():
+                    if other_sym != sym and sibling_prefix in other_sym.upper():
+                        sibling_candles = other_candles
+                        break
 
             is_core = (sym in core_list) if core_list else True
             sig = evaluate_signal(
@@ -2021,12 +2059,14 @@ class StrategyEngine:
                 stock_candles_5m=stock_candles,
                 benchmark_candles_5m=bench_candles,
                 opening_range=or_range,
-                market_regime=regime_eval.regime,
+                market_regime=sym_regime,
                 instrument=inst,
                 quote=quote,
                 config=self.config.signal,
                 is_entry_window=True,
                 is_core_symbol=is_core,
+                macro_state=self.latest_macro_state,
+                sibling_candles_5m=sibling_candles,
             )
             eval_candles = stock_candles
 
@@ -2051,12 +2091,14 @@ class StrategyEngine:
                                 stock_candles_5m=sub_stock,
                                 benchmark_candles_5m=sub_bench,
                                 opening_range=or_range,
-                                market_regime=regime_eval.regime,
+                                market_regime=sym_regime,
                                 instrument=inst,
                                 quote=quote,
                                 config=self.config.signal,
                                 is_entry_window=True,
                                 is_core_symbol=is_core,
+                                macro_state=self.latest_macro_state,
+                                sibling_candles_5m=sibling_candles,
                             )
                             if catchup_sig.decision in (Decision.PROPOSED_LONG, Decision.PROPOSED_SHORT):
                                 c_tick = inst.tick_size if inst and inst.tick_size > 0 else 0.05

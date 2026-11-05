@@ -500,9 +500,92 @@ def create_app(engine: StrategyEngine, config: AppConfig, journal: Journal) -> F
 
     @app.route("/api/test_order", methods=["POST"])
     def api_test_order():
-        """Places a safe 1-share AMO test order on Zerodha directly from the VM and cancels it immediately."""
+        """Places a safe test order strictly adhering to operating mode (PAPER vs LIVE safeguards)."""
         if not _is_authorized():
             return jsonify({"status": "error", "message": "Unauthorized: valid operator token required"}), 401
+
+        payload = request.get_json(silent=True) or {}
+        symbol = str(payload.get("symbol") or ("SILVERMIC" if getattr(config, "exchange", "MCX") == "MCX" else "IDEA")).strip().upper()
+        quantity = int(payload.get("quantity") or 1)
+        target_exchange = "MCX" if (any(k in symbol for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")) or getattr(config, "exchange", "MCX") == "MCX") and symbol != "IDEA" else "NSE"
+        
+        default_prod = "MIS" if target_exchange == "MCX" else "CNC"
+        product = str(payload.get("product") or default_prod).strip().upper()
+        if target_exchange == "MCX" and product == "CNC":
+            product = "MIS"
+        tag = str(payload.get("tag") or "VM_TEST").strip()
+
+        # Dynamic Market Hours vs AMO detection based on exchange
+        from datetime import time as dtime
+        now_ist = engine.scheduler.now_ist() if hasattr(engine, "scheduler") else datetime.now(IST)
+        is_weekday = now_ist.weekday() < 5
+        if target_exchange == "MCX":
+            # MCX: 09:00 to 23:30 (summer) / 23:55 (winter)
+            is_market_open = is_weekday and (dtime(9, 0) <= now_ist.time() <= dtime(23, 55))
+        else:
+            # NSE: 09:15 to 15:30
+            is_market_open = is_weekday and (dtime(9, 15) <= now_ist.time() <= dtime(15, 30))
+        variety = str(payload.get("variety") or ("regular" if is_market_open else "amo")).strip().lower()
+
+        # Dynamic Price and Circuit Band Resolution
+        custom_price = payload.get("price")
+        if custom_price is not None and float(custom_price) > 0:
+            test_price = float(custom_price)
+        else:
+            inst = None
+            quote = None
+            try:
+                inst = engine.broker.get_instrument_info(symbol, exchange=target_exchange)
+                quote = engine.broker.get_quote(symbol)
+            except Exception:
+                pass
+
+            tick = float(getattr(inst, "tick_size", 1.0 if target_exchange == "MCX" else 0.05) or (1.0 if target_exchange == "MCX" else 0.05))
+            low_c = float(getattr(inst, "lower_circuit", 0.0) or 0.0)
+            up_c = float(getattr(inst, "upper_circuit", 0.0) or 0.0)
+            ltp = float(getattr(quote, "last_price", 0.0) or 0.0)
+
+            from apex3.strategy.trail import round_to_tick
+            if low_c > 0 and up_c > 0:
+                test_price = round_to_tick(low_c + (2 * tick), tick_size=tick)
+            elif ltp > 0:
+                test_price = round_to_tick(ltp * 0.95, tick_size=tick)
+            else:
+                test_price = 11.10 if symbol == "IDEA" else (85000.0 if "SILVER" in symbol else 100.0)
+
+        # PAPER MODE SAFEGUARD: Never place live orders when configured for paper trading
+        if str(getattr(config, "mode", "paper")).lower() != "live":
+            from apex3.models import OrderRequest, Side, OrderType, Product as OrdProduct
+            ord_prod = OrdProduct.MIS if product == "MIS" else (OrdProduct.NRML if product == "NRML" else OrdProduct.CNC)
+            req = OrderRequest(
+                symbol=symbol,
+                side=Side.BUY,
+                quantity=quantity,
+                order_type=OrderType.LIMIT,
+                price=test_price,
+                product=ord_prod,
+                tag=tag,
+                exchange=target_exchange,
+            )
+            order_id = engine.broker.place_order(req)
+            return jsonify({
+                "status": "success",
+                "mode": "PAPER",
+                "message": "Paper test order placed safely via PaperBroker; zero real capital touched.",
+                "order_id": str(order_id),
+                "placed_symbol": symbol,
+                "placed_price": test_price,
+                "placed_variety": variety,
+                "cancel_attempt": "NOT_NEEDED_PAPER",
+                "orderbook_status": "SIMULATED_ACCEPTED",
+            })
+
+        # LIVE MODE CHECKS: Mandatory safety gates before real capital is touched
+        if not getattr(config, "allow_live_trading", False) or not getattr(config, "compliance_acknowledged", False):
+            return jsonify({
+                "status": "error",
+                "message": "Live order placement blocked: allow_live_trading and compliance_acknowledged must both be True in config",
+            }), 403
 
         api_key = config.secrets.kite_api_key or os.environ.get("KITE_API_KEY", "")
         access_token = os.environ.get("KITE_ACCESS_TOKEN", "")
@@ -516,51 +599,11 @@ def create_app(engine: StrategyEngine, config: AppConfig, journal: Journal) -> F
             from kiteconnect import KiteConnect
             kite = KiteConnect(api_key=api_key)
             kite.set_access_token(access_token)
-
-        payload = request.get_json(silent=True) or {}
-        symbol = str(payload.get("symbol") or "IDEA").strip().upper()
-        quantity = int(payload.get("quantity") or 1)
-        product = str(payload.get("product") or "CNC").strip().upper()
-        tag = str(payload.get("tag") or "VM_TEST").strip()
-
-        # Dynamic Market Hours vs AMO detection
-        from datetime import time as dtime
-        now_ist = engine.scheduler.now_ist() if hasattr(engine, "scheduler") else datetime.now(IST)
-        is_weekday = now_ist.weekday() < 5
-        is_market_open = is_weekday and (dtime(9, 15) <= now_ist.time() <= dtime(15, 30))
-        variety = str(payload.get("variety") or ("regular" if is_market_open else "amo")).strip().lower()
-
-        # Dynamic Price and Circuit Band Resolution
-        custom_price = payload.get("price")
-        if custom_price is not None and float(custom_price) > 0:
-            test_price = float(custom_price)
-        else:
-            inst = None
-            quote = None
-            try:
-                inst = engine.broker.get_instrument_info(symbol)
-                quote = engine.broker.get_quote(symbol)
-            except Exception:
-                pass
-
-            tick = float(getattr(inst, "tick_size", 0.05) or 0.05)
-            low_c = float(getattr(inst, "lower_circuit", 0.0) or 0.0)
-            up_c = float(getattr(inst, "upper_circuit", 0.0) or 0.0)
-            ltp = float(getattr(quote, "last_price", 0.0) or 0.0)
-
-            from apex3.strategy.trail import round_to_tick
-            if low_c > 0 and up_c > 0:
-                test_price = round_to_tick(low_c + (2 * tick), tick_size=tick)
-            elif ltp > 0:
-                test_price = round_to_tick(ltp * 0.95, tick_size=tick)
-            else:
-                test_price = 11.10 if symbol == "IDEA" else 100.0
-
         try:
             import time
             order_id = kite.place_order(
                 variety=variety,
-                exchange="NSE",
+                exchange=target_exchange,
                 tradingsymbol=symbol,
                 transaction_type="BUY",
                 quantity=quantity,

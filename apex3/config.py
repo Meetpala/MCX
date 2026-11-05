@@ -378,7 +378,7 @@ def _load_secrets() -> SecretsConfig:
     )
 
 
-def _parse_schedule(raw: dict, fallback_raw: Optional[dict] = None) -> ScheduleConfig:
+def _parse_schedule(raw: dict, fallback_raw: Optional[dict] = None, exchange: str = "NSE") -> ScheduleConfig:
     """Parse schedule section, collecting holidays from all schedule and holiday keys."""
     merged = dict(fallback_raw or {})
     merged.update(raw)
@@ -397,15 +397,17 @@ def _parse_schedule(raw: dict, fallback_raw: Optional[dict] = None) -> ScheduleC
                 elif "special_sessions" in key and isinstance(value, dict):
                     special_sessions.update({str(k): str(v) for k, v in value.items()})
 
+    sched_exchange = str(merged.get("exchange", exchange)).upper()
     return ScheduleConfig(
-        market_open=str(merged.get("or_start_time", merged.get("market_open", "09:15"))),
-        opening_range_end=str(merged.get("or_end_time", merged.get("opening_range_end", "09:30"))),
-        entry_start=str(merged.get("entry_start_time", merged.get("entry_start", "09:35"))),
-        entry_cutoff=str(merged.get("entry_cutoff_time", merged.get("entry_cutoff", "12:30"))),
-        flatten_start=str(merged.get("square_off_time", merged.get("flatten_start", "14:55"))),
-        flat_target=str(merged.get("flat_verification_time", merged.get("flat_target", "14:58"))),
-        market_close=str(merged.get("market_close", "15:30")),
-        hard_deadline=str(merged.get("hard_deadline", "15:00")),
+        exchange=sched_exchange,
+        market_open=str(merged.get("or_start_time", merged.get("market_open", "09:00" if sched_exchange == "MCX" else "09:15"))),
+        opening_range_end=str(merged.get("or_end_time", merged.get("opening_range_end", "09:15" if sched_exchange == "MCX" else "09:30"))),
+        entry_start=str(merged.get("entry_start_time", merged.get("entry_start", "09:15" if sched_exchange == "MCX" else "09:35"))),
+        entry_cutoff=str(merged.get("entry_cutoff_time", merged.get("entry_cutoff", "22:40" if sched_exchange == "MCX" else "12:30"))),
+        flatten_start=str(merged.get("square_off_time", merged.get("flatten_start", "23:35" if sched_exchange == "MCX" else "14:55"))),
+        flat_target=str(merged.get("flat_verification_time", merged.get("flat_target", "23:45" if sched_exchange == "MCX" else "14:58"))),
+        market_close=str(merged.get("market_close", "23:55" if sched_exchange == "MCX" else "15:30")),
+        hard_deadline=str(merged.get("hard_deadline", "23:50" if sched_exchange == "MCX" else "15:00")),
         stale_threshold_sec=int(merged.get("stale_threshold_sec", 15)),
         holidays=sorted(holidays),
         special_sessions=special_sessions,
@@ -685,7 +687,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             max_modifications_per_order=int(ratchet_config.max_stop_modifications),
             modification_headroom=int(stops_raw.get("modification_headroom", 3)),
         ),
-        schedule=_parse_schedule(session_sched, sched_section),
+        schedule=_parse_schedule(session_sched, sched_section, exchange=exchange),
         rate_limits=RateLimitsConfig(
             orders_per_second=int(rate_limits_raw.get("orders_per_second", 10)),
             orders_per_minute=int(rate_limits_raw.get("orders_per_minute", 200)),

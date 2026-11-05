@@ -89,8 +89,20 @@ class HybridBrokerAdapter(BrokerInterface):
             exchange=exchange,
         )
 
-    def get_instrument_info(self, symbol: str, exchange: str = "NSE") -> InstrumentInfo:
+    def get_instrument_info(self, symbol: str, exchange: Optional[str] = None) -> InstrumentInfo:
         """Fetch instrument info, using execution broker for execution metadata and data provider for streaming/circuits."""
+        if exchange is None:
+            exchange = "MCX" if any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS")) else "NSE"
+
+        # If symbol is a bare commodity root (e.g. SILVERMIC), attempt resolving to active dated contract
+        if exchange == "MCX" and symbol.upper() in ("SILVERMIC", "GOLDGUINEA", "GOLDTEN", "SILVERM", "GOLDM", "SILVER", "GOLD"):
+            try:
+                resolved_map = self.resolve_active_mcx_futures([symbol.upper()])
+                if symbol.upper() in resolved_map:
+                    symbol = resolved_map[symbol.upper()]
+            except Exception as re:
+                logger.debug("Could not resolve root %s to dated contract: %s", symbol, re)
+
         # 1. Query execution broker for authoritative Zerodha execution parameters
         exec_info: Optional[InstrumentInfo] = None
         if hasattr(self.execution_broker, "get_instrument_info"):

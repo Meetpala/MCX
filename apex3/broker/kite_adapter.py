@@ -800,6 +800,17 @@ class KiteAdapter(BrokerInterface):
 
         self._require_kite()
         inst = self._get_instruments(exchange).get(symbol)
+        if inst is None and exchange == "MCX":
+            try:
+                resolved_map = self.resolve_active_mcx_futures([symbol])
+                if symbol in resolved_map:
+                    dated_sym = resolved_map[symbol]
+                    inst = self._get_instruments(exchange).get(dated_sym)
+                    if inst:
+                        symbol = dated_sym
+            except Exception as res_err:
+                logger.debug("Could not resolve bare MCX symbol %s to dated contract: %s", symbol, res_err)
+
         default_tick = 1.0 if exchange == "MCX" else 0.05
         tick = float(inst.get("tick_size", default_tick)) if inst else default_tick
         order_lot = int(inst.get("lot_size", 1)) if inst else 1

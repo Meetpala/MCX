@@ -1,0 +1,26 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Logs and runtime artifacts
+logs/
+*.log
+info.log
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# OS metadata
+.DS_Store
+Thumbs.db
