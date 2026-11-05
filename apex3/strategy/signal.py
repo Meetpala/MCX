@@ -31,6 +31,7 @@ from typing import Literal, Optional, Union
 
 from apex3.config import SignalConfig
 from apex3.indicators.atr import compute_atr
+from apex3.indicators.ema import compute_ema
 from apex3.indicators.vwap import compute_session_vwap
 from apex3.models import (
     Candle,
@@ -62,6 +63,7 @@ class SignalEvaluation:
     relative_volume: float = 0.0
     relative_strength: float = 0.0
     circuit_distance_pct: float = 0.0
+    playbook: str = "TREND"
 
     def __post_init__(self):
         if self.gates is None:
@@ -178,6 +180,43 @@ def build_opening_range(
 build_mcx_opening_range = build_opening_range
 
 
+def reconstruct_session_opening_ranges(
+    symbol: str,
+    candles: list[Candle],
+    target_date: Optional[date] = None,
+    is_dst: Optional[bool] = None,
+) -> dict[str, OpeningRange]:
+    """Reconstruct MORNING and COMEX opening ranges from completed candles.
+
+    Returns dict with keys:
+    - "MORNING": OpeningRange for 09:00-09:15 IST (or 09:15-09:30)
+    - "COMEX": OpeningRange for 17:00-17:30 (EDT) or 18:00-18:30 (EST)
+    - "ACTIVE": Active OpeningRange based on latest candle time
+    """
+    or_morning = build_opening_range(symbol, candles, session_date=target_date, session_type="MORNING")
+    or_comex = build_opening_range(symbol, candles, session_date=target_date, session_type="COMEX")
+
+    completed = [c for c in candles if getattr(c, "is_complete", True)]
+    active_or = or_morning
+    if completed:
+        last_dt = (
+            completed[-1].timestamp
+            if completed[-1].timestamp.tzinfo
+            else completed[-1].timestamp.replace(tzinfo=IST)
+        ).astimezone(IST)
+        d = target_date or last_dt.date()
+        dst_val = is_dst if is_dst is not None else is_us_dst(d)
+        comex_start_hour = 17 if dst_val else 18
+        if last_dt.time() >= time(comex_start_hour, 0) and or_comex.is_complete:
+            active_or = or_comex
+
+    return {
+        "MORNING": or_morning,
+        "COMEX": or_comex,
+        "ACTIVE": active_or,
+    }
+
+
 def compute_relative_strength(
     stock_closes: list[float],
     benchmark_closes: list[float],
@@ -196,6 +235,349 @@ def compute_relative_strength(
     return (stock_ret - bench_ret) * 100.0
 
 
+def evaluate_aurum_signal(
+    symbol: str,
+    candles_5m: list[Candle],
+    benchmark_candles_5m: list[Candle],
+    opening_range: OpeningRange,
+    market_regime: MarketRegime,
+    instrument: InstrumentInfo,
+    quote: Optional[Quote],
+    config: SignalConfig,
+    is_entry_window: bool = True,
+    sibling_candles_5m: Optional[list[Candle]] = None,
+    macro_state: Optional[Any] = None,
+) -> SignalEvaluation:
+    """Evaluate MCX Bullion Futures using AURUM-APEX Dual-Playbook Engine.
+
+    - Playbook A (TREND):
+      * Trigger A1: Opening Range / Squeeze Breakout with cushion + CLV >= 0.70 + RVOL >= 1.50x
+      * Trigger A2: First Institutional Pullback to EMA20 / VWAP + 0.35 SD resumption
+    - Playbook B (SWEEP_RECLAIM):
+      * Institutional Liquidity Sweep & VWAP/EMA20 Reclaim with Bullion SMT confirmation
+    """
+    from apex3.strategy.regime import calculate_session_anchored_vwap, detect_smt_divergence
+
+    gates: list[GateResult] = []
+
+    # 1. Entry Window Gate
+    if not is_entry_window:
+        gates.append(GateResult(name="ENTRY_WINDOW", status=GateStatus.FAIL, reason="Outside active MCX entry window", data={"code": "OUTSIDE_ENTRY_WINDOW"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["OUTSIDE_ENTRY_WINDOW"],
+            explanation="Outside active MCX entry window (09:15 - pre-close cutoff)",
+        )
+    gates.append(GateResult(name="ENTRY_WINDOW", status=GateStatus.PASS, reason="Inside active MCX entry window"))
+
+    # 2. Quote Freshness & Depth Gate
+    if quote is None:
+        gates.append(GateResult(name="QUOTE_FRESHNESS", status=GateStatus.FAIL, reason="Missing live quote", data={"code": "MISSING_QUOTE"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["MISSING_QUOTE"],
+            explanation="Live quote required for signal evaluation",
+        )
+    if not quote.is_fresh:
+        gates.append(GateResult(name="QUOTE_FRESHNESS", status=GateStatus.FAIL, reason="Quote data stale", data={"code": "STALE_QUOTE"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["STALE_QUOTE"],
+            explanation="Quote data exceeds staleness threshold or lacks depth",
+        )
+    if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
+        gates.append(GateResult(name="SPREAD", status=GateStatus.FAIL, reason="Invalid market depth", data={"code": "INVALID_DEPTH"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["INVALID_DEPTH"],
+            explanation=f"Invalid quote depth: bid={quote.bid:.2f}, ask={quote.ask:.2f}",
+        )
+    mid = (quote.bid + quote.ask) / 2.0
+    spread_bps = ((quote.ask - quote.bid) / mid) * 10000.0
+    max_spread = float(getattr(config, "max_spread_bps", 20.0))
+    if spread_bps > max_spread:
+        gates.append(GateResult(name="SPREAD", status=GateStatus.FAIL, reason=f"Spread {spread_bps:.1f} bps > max {max_spread:.1f} bps", data={"code": "EXCESSIVE_SPREAD"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["EXCESSIVE_SPREAD"],
+            explanation=f"Spread {spread_bps:.1f} bps > max {max_spread:.1f} bps",
+        )
+    gates.append(GateResult(name="QUOTE_FRESHNESS", status=GateStatus.PASS, reason="Quote fresh"))
+    gates.append(GateResult(name="SPREAD", status=GateStatus.PASS, reason=f"Spread acceptable ({spread_bps:.1f} bps)"))
+
+    # 3. Market Regime Alignment Gate
+    if market_regime == MarketRegime.WAITING:
+        gates.append(GateResult(name="REGIME_ALIGNMENT", status=GateStatus.FAIL, reason="Market regime is WAITING", data={"code": "REGIME_WAITING"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["REGIME_WAITING"],
+            explanation="Market regime is WAITING (choppy CI_14 >= 50.0, ADX < 21.0, or inside VWAP +- 0.30 SD)",
+        )
+    if market_regime == MarketRegime.NEUTRAL:
+        gates.append(GateResult(name="REGIME_ALIGNMENT", status=GateStatus.FAIL, reason="Market regime is NEUTRAL", data={"code": "MARKET_REGIME_NEUTRAL"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["MARKET_REGIME_NEUTRAL"],
+            explanation="Market regime is NEUTRAL; entries prohibited",
+        )
+
+    target_side = Side.BUY if market_regime == MarketRegime.BULLISH else Side.SELL
+    gates.append(GateResult(name="REGIME_ALIGNMENT", status=GateStatus.PASS, reason=f"Regime aligns with target side: {target_side.value}"))
+
+    # 4. Macro News Blackout Gate
+    if macro_state is not None:
+        passed, rej_code = evaluate_news_gate(target_side, macro_state, getattr(config, "news", None))
+        if not passed:
+            gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.FAIL, reason=f"Macro news failed: {rej_code}", data={"code": rej_code}))
+            return SignalEvaluation(
+                symbol=symbol,
+                decision=Decision.WAIT,
+                gates=gates,
+                reason_codes=[rej_code],
+                explanation=f"Macro news gate failed: {rej_code}",
+            )
+    gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
+
+    # 5. Opening Range Verification
+    if not opening_range.is_complete or opening_range.high <= opening_range.low:
+        gates.append(GateResult(name="OPENING_RANGE", status=GateStatus.FAIL, reason="Opening range incomplete", data={"code": "INCOMPLETE_OPENING_RANGE"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["INCOMPLETE_OPENING_RANGE"],
+            explanation=f"Opening range for {symbol} is incomplete or invalid",
+        )
+    or_width_pct = (opening_range.high - opening_range.low) / opening_range.low
+    max_or_w = float(getattr(config, "max_or_width_pct", 0.0065))
+    if or_width_pct > max_or_w and or_width_pct > 0.0105:
+        gates.append(GateResult(name="OR_WIDTH", status=GateStatus.FAIL, reason=f"Opening Range width {or_width_pct*100:.2f}% > limit", data={"code": "OR_WIDTH_EXCEEDED"}))
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            gates=gates,
+            reason_codes=["OR_WIDTH_EXCEEDED"],
+            explanation=f"Opening Range width {or_width_pct*100:.2f}% exceeds limit",
+        )
+    gates.append(GateResult(name="OPENING_RANGE", status=GateStatus.PASS, reason="Opening range complete and valid"))
+
+    # 6. Completed 5m Candle Indicators
+    completed = [c for c in candles_5m if getattr(c, "is_complete", True)]
+    if len(completed) < 3:
+        return SignalEvaluation(
+            symbol=symbol,
+            decision=Decision.WAIT,
+            reason_codes=["NO_COMPLETED_CANDLES"],
+            explanation="Insufficient completed 5m candles",
+        )
+
+    latest_bar = completed[-1]
+    signal_price = latest_bar.close
+    closes = [c.close for c in completed]
+    highs = [c.high for c in completed]
+    lows = [c.low for c in completed]
+
+    atr_series = compute_atr(highs, lows, closes, period=14)
+    atr14 = atr_series[-1] if atr_series else max(latest_bar.high - latest_bar.low, 1.0)
+    ema_series = compute_ema(closes, period=20)
+    ema20 = ema_series[-1] if ema_series else signal_price
+
+    stock_vwap, sigma_vwap = calculate_session_anchored_vwap(completed)
+    bar_range = max(latest_bar.high - latest_bar.low, 1.0)
+    clv_buy = (latest_bar.close - latest_bar.low) / bar_range
+    clv_sell = (latest_bar.high - latest_bar.close) / bar_range
+
+    prior_vols = [c.volume for c in completed[-21:-1]]
+    avg_vol = sum(prior_vols) / max(1, len(prior_vols)) if prior_vols else 1.0
+    rvol = latest_bar.volume / avg_vol if avg_vol > 0 else 1.0
+
+    # Bullion SMT Divergence Check
+    smt_type = None
+    if sibling_candles_5m:
+        smt_res, _ = detect_smt_divergence(completed, sibling_candles_5m, lookback=6)
+        smt_type = smt_res
+
+    # -----------------------------------------------------------------------
+    # Playbook B: Institutional Liquidity Sweep & VWAP Reclaim (High Priority)
+    # -----------------------------------------------------------------------
+    if target_side == Side.BUY:
+        bar_t_sweep = latest_bar.low < opening_range.low
+        bar_prev_sweep = (len(completed) >= 2 and completed[-2].low < opening_range.low)
+        if bar_t_sweep or bar_prev_sweep:
+            min_sweep_low = min(latest_bar.low, completed[-2].low if len(completed) >= 2 else latest_bar.low)
+            sweep_depth = (opening_range.low - min_sweep_low) / max(0.1, atr14)
+            if 0.10 <= sweep_depth <= 0.65:
+                reclaimed = (signal_price >= opening_range.low + 0.10 * atr14) and (signal_price > opening_range.low or signal_price > ema20 or signal_price > stock_vwap)
+                smt_ok = (smt_type == "BULLISH_SMT") or (market_regime == MarketRegime.BULLISH)
+                if reclaimed and clv_buy >= 0.70 and rvol >= 1.50 and smt_ok:
+                    res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook B Bullish Sweep Reclaim passed")]
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.PROPOSED_LONG,
+                        side=Side.BUY,
+                        gates=res_gates,
+                        signal_price=signal_price,
+                        or_high=opening_range.high,
+                        or_low=opening_range.low,
+                        vwap=stock_vwap,
+                        relative_volume=rvol,
+                        playbook="SWEEP_RECLAIM",
+                        reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_B_SWEEP_RECLAIM"],
+                        explanation=f"Playbook B Liquidity Sweep Reclaim: Swept OR low by {sweep_depth:.2f}x ATR, reclaimed VWAP/EMA20 (CLV={clv_buy:.2f}, RVOL={rvol:.2f}x, SMT={smt_type})",
+                    )
+    else:  # Side.SELL
+        bar_t_sweep = latest_bar.high > opening_range.high
+        bar_prev_sweep = (len(completed) >= 2 and completed[-2].high > opening_range.high)
+        if bar_t_sweep or bar_prev_sweep:
+            max_sweep_high = max(latest_bar.high, completed[-2].high if len(completed) >= 2 else latest_bar.high)
+            sweep_depth = (max_sweep_high - opening_range.high) / max(0.1, atr14)
+            if 0.10 <= sweep_depth <= 0.65:
+                reclaimed = (signal_price <= opening_range.high - 0.10 * atr14) and (signal_price < opening_range.high or signal_price < ema20 or signal_price < stock_vwap)
+                smt_ok = (smt_type == "BEARISH_SMT") or (market_regime == MarketRegime.BEARISH)
+                if reclaimed and clv_sell >= 0.70 and rvol >= 1.50 and smt_ok:
+                    res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook B Bearish Sweep Upthrust passed")]
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.PROPOSED_SHORT,
+                        side=Side.SELL,
+                        gates=res_gates,
+                        signal_price=signal_price,
+                        or_high=opening_range.high,
+                        or_low=opening_range.low,
+                        vwap=stock_vwap,
+                        relative_volume=rvol,
+                        playbook="SWEEP_RECLAIM",
+                        reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_B_SWEEP_UPTHRUST"],
+                        explanation=f"Playbook B Liquidity Sweep Upthrust: Swept OR high by {sweep_depth:.2f}x ATR, rejected below VWAP/EMA20 (CLV={clv_sell:.2f}, RVOL={rvol:.2f}x, SMT={smt_type})",
+                    )
+
+    # -----------------------------------------------------------------------
+    # Playbook A: Institutional Trend Expansion & First Pullback
+    # -----------------------------------------------------------------------
+    cushion = 0.15 * atr14
+    if target_side == Side.BUY:
+        # Trigger A1: OR Breakout
+        effective_band = max(sigma_vwap, 0.75 * atr14)
+        not_overextended = (sigma_vwap <= 0) or (signal_price <= stock_vwap + 1.85 * effective_band)
+        if signal_price >= opening_range.high + cushion and clv_buy >= 0.70 and rvol >= 1.50 and not_overextended:
+            res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakout passed")]
+            return SignalEvaluation(
+                symbol=symbol,
+                decision=Decision.PROPOSED_LONG,
+                side=Side.BUY,
+                gates=res_gates,
+                signal_price=signal_price,
+                or_high=opening_range.high,
+                or_low=opening_range.low,
+                vwap=stock_vwap,
+                relative_volume=rvol,
+                playbook="TREND",
+                reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A1_OR_BREAKOUT"],
+                explanation=f"Playbook A1 Trend Breakout: C={signal_price:.2f} >= OR_H+cushion ({opening_range.high + cushion:.2f}), CLV={clv_buy:.2f}, RVOL={rvol:.2f}x",
+            )
+
+        # Trigger A2: First Institutional Pullback
+        prior_breakout = any(c.high >= opening_range.high + 0.50 * atr14 for c in completed[:-2])
+        if prior_breakout and len(completed) >= 4:
+            recent_pullback_bars = completed[-4:-1]
+            lows_in_zone = any(
+                (stock_vwap + 0.35 * sigma_vwap <= c.low <= ema20) or (abs(c.low - ema20) <= 0.35 * atr14)
+                for c in recent_pullback_bars
+            )
+            resumption = latest_bar.close > completed[-2].high
+            if lows_in_zone and resumption and clv_buy >= 0.70 and rvol >= 1.35:
+                res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A2 Pullback Continuation passed")]
+                return SignalEvaluation(
+                    symbol=symbol,
+                    decision=Decision.PROPOSED_LONG,
+                    side=Side.BUY,
+                    gates=res_gates,
+                    signal_price=signal_price,
+                    or_high=opening_range.high,
+                    or_low=opening_range.low,
+                    vwap=stock_vwap,
+                    relative_volume=rvol,
+                    playbook="TREND",
+                    reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A2_PULLBACK_CONTINUATION"],
+                    explanation=f"Playbook A2 Pullback Continuation: Retested EMA20/VWAP+0.35SD and resumed > H_prev (CLV={clv_buy:.2f}, RVOL={rvol:.2f}x)",
+                )
+
+    else:  # Side.SELL
+        # Trigger A1: OR Breakdown
+        effective_band = max(sigma_vwap, 0.75 * atr14)
+        not_overextended = (sigma_vwap <= 0) or (signal_price >= stock_vwap - 1.85 * effective_band)
+        if signal_price <= opening_range.low - cushion and clv_sell >= 0.70 and rvol >= 1.50 and not_overextended:
+            res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A1 Trend Breakdown passed")]
+            return SignalEvaluation(
+                symbol=symbol,
+                decision=Decision.PROPOSED_SHORT,
+                side=Side.SELL,
+                gates=res_gates,
+                signal_price=signal_price,
+                or_high=opening_range.high,
+                or_low=opening_range.low,
+                vwap=stock_vwap,
+                relative_volume=rvol,
+                playbook="TREND",
+                reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A1_OR_BREAKDOWN"],
+                explanation=f"Playbook A1 Trend Breakdown: C={signal_price:.2f} <= OR_L-cushion ({opening_range.low - cushion:.2f}), CLV={clv_sell:.2f}, RVOL={rvol:.2f}x",
+            )
+
+        # Trigger A2: First Institutional Pullback
+        prior_breakdown = any(c.low <= opening_range.low - 0.50 * atr14 for c in completed[:-2])
+        if prior_breakdown and len(completed) >= 4:
+            recent_pullback_bars = completed[-4:-1]
+            highs_in_zone = any(
+                (ema20 <= c.high <= stock_vwap - 0.35 * sigma_vwap) or (abs(c.high - ema20) <= 0.35 * atr14)
+                for c in recent_pullback_bars
+            )
+            resumption = latest_bar.close < completed[-2].low
+            if highs_in_zone and resumption and clv_sell >= 0.70 and rvol >= 1.35:
+                res_gates = list(gates) + [GateResult(name="PLAYBOOK", status=GateStatus.PASS, reason="Playbook A2 Bearish Pullback Continuation passed")]
+                return SignalEvaluation(
+                    symbol=symbol,
+                    decision=Decision.PROPOSED_SHORT,
+                    side=Side.SELL,
+                    gates=res_gates,
+                    signal_price=signal_price,
+                    or_high=opening_range.high,
+                    or_low=opening_range.low,
+                    vwap=stock_vwap,
+                    relative_volume=rvol,
+                    playbook="TREND",
+                    reason_codes=["ALL_GATES_PASSED", "PLAYBOOK_A2_PULLBACK_CONTINUATION"],
+                    explanation=f"Playbook A2 Bearish Pullback Continuation: Bounced into EMA20/VWAP-0.35SD and resumed < L_prev (CLV={clv_sell:.2f}, RVOL={rvol:.2f}x)",
+                )
+
+    # Neither playbook triggered
+    return SignalEvaluation(
+        symbol=symbol,
+        decision=Decision.WAIT,
+        gates=list(gates),
+        signal_price=signal_price,
+        or_high=opening_range.high,
+        or_low=opening_range.low,
+        vwap=stock_vwap,
+        relative_volume=rvol,
+        reason_codes=["NO_SETUP_TRIGGERED"],
+        explanation=f"Neither Playbook A nor Playbook B triggered for {symbol} at {signal_price:.2f}",
+    )
+
+
 def evaluate_signal(
     symbol: str,
     stock_candles_5m: list[Candle],
@@ -208,11 +590,29 @@ def evaluate_signal(
     is_entry_window: bool = True,
     is_core_symbol: bool = True,
     macro_state: Optional[Any] = None,
+    sibling_candles_5m: Optional[list[Candle]] = None,
 ) -> SignalEvaluation:
-    """Evaluate a single stock for entry signal across all 8 gates.
+    """Evaluate a single stock or MCX commodity for entry signal.
 
     Fails closed: Any failed gate or missing/stale data results in WAIT.
+    For MCX Bullion instruments, executes Dual-Playbook Engine (Playbook A & Playbook B).
     """
+    is_bullion = any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD"))
+    if is_bullion:
+        return evaluate_aurum_signal(
+            symbol=symbol,
+            candles_5m=stock_candles_5m,
+            benchmark_candles_5m=benchmark_candles_5m,
+            opening_range=opening_range,
+            market_regime=market_regime,
+            instrument=instrument,
+            quote=quote,
+            config=config,
+            is_entry_window=is_entry_window,
+            sibling_candles_5m=sibling_candles_5m,
+            macro_state=macro_state,
+        )
+
     gates: list[GateResult] = []
     reason_codes: list[str] = []
 

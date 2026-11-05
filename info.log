@@ -12,3 +12,47 @@ Awaiting trading sessions starting from 2026-10-28 09:15 IST.
 All future trade executions, fills, exits, and PnL audits will be recorded below.
 ================================================================================
 
+================================================================================
+[2026-11-05 15:30:00 IST] TRADING SESSION AUDIT — DAILY RECONCILIATION
+[RECORD_ID: APEX3-SESSION-20261105]
+--------------------------------------------------------------------------------
+Session Date    : 2026-11-05 (Thursday)
+Market Status   : NSE Cash Equities Intraday Session Closed
+Trades Executed : 0 trades
+Execution Notes : No qualifying 9-gate institutional breakouts / System in Risk-Off mode
+Position State  : 0 Open Positions (100% Flat / Zero Overnight Risk)
+Starting Capital: Rs. 15,000.00
+Capital at Risk : Rs. 0.00 (100% Capital Preserved)
+Gross Session PnL: Rs. 0.00
+Total Friction  : Rs. 0.00
+Net Realized PnL: Rs. 0.00
+Session Return  : 0.00%
+Cumulative PnL  : +Rs. 222.88
+Account Equity  : Rs. 15,222.88
+Status          : AUDITED & FLAT — Reconciled with zero open risk
+================================================================================
+
+================================================================================
+[2026-11-04 11:00:00 IST] TRADE EXECUTION — POSITION CLOSED (TARGET_HIT)
+[RECORD_ID: EXIT_TGT_001]
+--------------------------------------------------------------------------------
+Symbol          : SILVERMIC (NSE)
+Exit Action     : SELL (Close LONG)
+Exit Reason     : TARGET_HIT
+Shares Traded   : 1 shares
+Entry Price     : Rs. 95,000.00
+Exit Fill Price : Rs. 95,500.00
+Entry Time (IST): Intraday Entry
+Exit Time (IST) : 2026-11-04 11:00:00 IST
+Holding Duration: Intraday
+Exit Order ID   : EXIT_TGT_001
+Exit Trade ID   : EXIT_TGT_001
+--------------------------------------------------------------------------------
+Gross PnL       : +Rs. 500.00
+Zerodha Friction: Rs. 81.30 (Brokerage: Rs. 40.00 | STT: Rs. 23.88 | Txn: Rs. 6.06 | GST: Rs. 8.32 | Stamp: Rs. 2.85)
+Net Realized PnL: +Rs. 418.70 (+1.76% on margin)
+Realized R-Mult : +2.00R
+Friction Ratio  : 16.26% (Rule Invariant: < 26.0% [PASS])
+Status          : POSITION CLOSED & RECONCILED
+================================================================================
+

@@ -1447,6 +1447,9 @@ class StrategyEngine:
                     # Update High/Low water mark
                     pos.best_favorable_price = trail_eval.best_favorable_price
                     pos.trail_activated = trail_eval.trail_activated
+                    pos.hwm_price = getattr(trail_eval, "hwm_price", trail_eval.best_favorable_price)
+                    pos.hwm_r = getattr(trail_eval, "hwm_r", trail_eval.r_multiple)
+                    pos.ratchet_stage = getattr(trail_eval, "ratchet_stage", 0)
 
                     broker_action = "NONE"
                     if trail_eval.should_modify:
@@ -2354,18 +2357,75 @@ class StrategyEngine:
             )
 
             if not sizing.is_valid or sizing.quantity <= 0:
-                decisions.append(
-                    StrategyDecision(
-                        decision=Decision.WAIT,
-                        symbol=sym,
-                        side=side,
-                        timestamp_ist=now,
-                        reason_codes=[sizing.rejection_code or "SIZING_REJECTED"],
-                        explanation=f"Sizing rejected for {sym}: {sizing.rejection_reason}",
-                        gates=[sizing.gate],
+                # Attempt automatic contract step-down for MCX Precious Metals
+                stepped_down = False
+                sym_root = getattr(inst, "symbol_root", "") or ""
+                if not sym_root:
+                    for r in ("SILVERMIC", "GOLDGUINEA", "GOLDPETAL", "GOLDTEN", "SILVERM", "GOLDM", "SILVER", "GOLD"):
+                        if sym.upper().startswith(r):
+                            sym_root = r
+                            break
+                step_down_map = {
+                    "SILVER": ["SILVERM", "SILVERMIC"],
+                    "SILVERM": ["SILVERMIC"],
+                    "GOLD": ["GOLDM", "GOLDTEN", "GOLDGUINEA"],
+                    "GOLDM": ["GOLDTEN", "GOLDGUINEA"],
+                }
+                candidates_to_try = step_down_map.get(sym_root, [])
+                for fb_root in candidates_to_try:
+                    try:
+                        resolved = self.broker.resolve_active_mcx_futures([fb_root])
+                        fb_inst = resolved.get(fb_root)
+                        if fb_inst:
+                            fb_sym = fb_inst.symbol
+                            fb_dummy = OrderRequest(
+                                symbol=fb_sym,
+                                exchange=getattr(self.config, "exchange", "MCX"),
+                                side=side,
+                                quantity=1,
+                                price=entry_price,
+                                product=Product.MIS,
+                                order_type=OrderType.LIMIT,
+                            )
+                            fb_margin_est = self.broker.estimate_order_margin(fb_dummy)
+                            fb_sizing = size_position(
+                                symbol=fb_sym,
+                                side=side,
+                                entry_price=entry_price,
+                                stop_price=initial_stop,
+                                num_qualified_symbols=num_qualified,
+                                margin_info=margin_info,
+                                instrument=fb_inst,
+                                limits_config=self.config.limits,
+                                risk_config=self.config.risk,
+                                order_margin_estimate=fb_margin_est,
+                            )
+                            if fb_sizing.is_valid and fb_sizing.quantity > 0:
+                                logger.info(
+                                    "Automatic step-down: transitioned %s -> %s (lots: %d) due to %s",
+                                    sym, fb_sym, fb_sizing.quantity, sizing.rejection_reason
+                                )
+                                sym = fb_sym
+                                inst = fb_inst
+                                sizing = fb_sizing
+                                stepped_down = True
+                                break
+                    except Exception as sde:
+                        logger.debug("Step-down attempt to %s failed: %s", fb_root, sde)
+
+                if not stepped_down:
+                    decisions.append(
+                        StrategyDecision(
+                            decision=Decision.WAIT,
+                            symbol=sym,
+                            side=side,
+                            timestamp_ist=now,
+                            reason_codes=[sizing.rejection_code or "SIZING_REJECTED"],
+                            explanation=f"Sizing rejected for {sym}: {sizing.rejection_reason}",
+                            gates=[sizing.gate],
+                        )
                     )
-                )
-                continue
+                    continue
 
             # Portfolio Risk Gate
             risk_status = evaluate_portfolio_risk(

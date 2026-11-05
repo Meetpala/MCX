@@ -268,6 +268,9 @@ class MarginInfo:
     equity_used: float = 0.0          # Currently utilized margin
     collateral: float = 0.0           # Collateral (not unrestricted cash)
     net_value: float = 0.0            # Net account value
+    live_balance: float = 0.0         # Live commodity/equity balance
+    commodity_available: float = 0.0  # Available commodity margin
+    available_equity: float = 0.0     # Available equity balance
     timestamp: Optional[datetime] = None
 
 

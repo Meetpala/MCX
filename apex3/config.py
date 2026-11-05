@@ -222,6 +222,7 @@ class StopsConfig:
 
 @dataclass(frozen=True)
 class ScheduleConfig:
+    exchange: str = "NSE"
     market_open: str = "09:15"
     opening_range_end: str = "09:30"
     entry_start: str = "09:35"

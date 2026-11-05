@@ -68,6 +68,28 @@ class SessionScheduler:
         self._hard_deadline = config.get_time("hard_deadline")
         self._market_close = config.get_time("market_close")
 
+    def _get_times_for_date(self, target_date: date) -> tuple[time, time, time, time, time, time]:
+        """Return (market_open, or_end, entry_start, entry_cutoff, flatten_start, market_close)."""
+        if getattr(self._config, "exchange", "NSE").upper() == "MCX":
+            from apex3.strategy.regime import get_active_mcx_session_windows
+            w = get_active_mcx_session_windows(target_date)
+            return (
+                w["market_open"],
+                w["or_morning_end"],
+                time(9, 15),
+                w["entry_cutoff"],
+                w["intraday_flatten"],
+                w["market_close"],
+            )
+        return (
+            self._market_open,
+            self._or_end,
+            self._entry_start,
+            self._entry_cutoff,
+            self._flatten_start,
+            self._market_close,
+        )
+
     def now_ist(self) -> datetime:
         """Get the current time in IST.
 
@@ -140,24 +162,26 @@ class SessionScheduler:
         if self._config.is_holiday(now_date):
             return SessionState.HOLIDAY
 
+        m_open, or_end, e_start, e_cutoff, f_start, m_close = self._get_times_for_date(now_date)
+
         # Pre-open
-        if now_time < self._market_open:
+        if now_time < m_open:
             return SessionState.PRE_OPEN
 
-        # Opening range: 09:15 to entry_start (09:30 / 09:35)
-        if self._market_open <= now_time < max(self._or_end, self._entry_start):
+        # Opening range
+        if m_open <= now_time < max(or_end, e_start):
             return SessionState.OPENING_RANGE
 
-        # Entry window: 09:30 to 14:15
-        if self._entry_start <= now_time < self._entry_cutoff:
+        # Entry window
+        if e_start <= now_time < e_cutoff:
             return SessionState.ENTRY_WINDOW
 
-        # Manage only: 14:15 to 14:55
-        if self._entry_cutoff <= now_time < self._flatten_start:
+        # Manage only
+        if e_cutoff <= now_time < f_start:
             return SessionState.MANAGE_ONLY
 
-        # Flatten: 14:55 to market close
-        if self._flatten_start <= now_time < self._market_close:
+        # Flatten
+        if f_start <= now_time < m_close:
             return SessionState.FLATTEN
 
         # Post close
@@ -215,7 +239,8 @@ class SessionScheduler:
         """
         now = at_time or self.now_ist()
         today = now.date()
-        flatten_dt = datetime.combine(today, self._flatten_start, tzinfo=IST)
+        _, _, _, _, f_start, _ = self._get_times_for_date(today)
+        flatten_dt = datetime.combine(today, f_start, tzinfo=IST)
         return (flatten_dt - now).total_seconds()
 
     def seconds_until_cutoff(self, at_time: Optional[datetime] = None) -> float:
@@ -225,7 +250,8 @@ class SessionScheduler:
         """
         now = at_time or self.now_ist()
         today = now.date()
-        cutoff_dt = datetime.combine(today, self._entry_cutoff, tzinfo=IST)
+        _, _, _, e_cutoff, _, _ = self._get_times_for_date(today)
+        cutoff_dt = datetime.combine(today, e_cutoff, tzinfo=IST)
         return (cutoff_dt - now).total_seconds()
 
     def get_next_trading_day(self, after_date: Optional[date] = None) -> date:

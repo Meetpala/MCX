@@ -7,13 +7,187 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date, datetime, time
 from enum import Enum
-from typing import Optional, Union
+from typing import Any, Optional, Union
+from zoneinfo import ZoneInfo
 
 from apex3.config import RegimeConfig
 from apex3.indicators.adx import compute_adx
 from apex3.indicators.ema import compute_ema, ema_slope
 from apex3.models import Candle, GateResult, GateStatus, Quote, Side
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def is_us_dst(dt: Union[date, datetime]) -> bool:
+    """Return True if the given date falls within US Daylight Saving Time (EDT).
+
+    US DST begins on the 2nd Sunday of March and ends on the 1st Sunday of November.
+    """
+    d = dt.date() if isinstance(dt, datetime) else dt
+    year = d.year
+
+    # 2nd Sunday of March
+    first_mar = date(year, 3, 1)
+    first_sun_mar = 1 + (6 - first_mar.weekday()) % 7
+    second_sun_mar = first_sun_mar + 7
+    dst_start = date(year, 3, second_sun_mar)
+
+    # 1st Sunday of November
+    first_nov = date(year, 11, 1)
+    first_sun_nov = 1 + (6 - first_nov.weekday()) % 7
+    dst_end = date(year, 11, first_sun_nov)
+
+    return dst_start <= d < dst_end
+
+
+def get_active_mcx_session_windows(dt: Union[date, datetime]) -> dict[str, Any]:
+    """Calculate active MCX session timing and cutoff windows for a given date.
+
+    - US Daylight Saving Time (Summer / EDT):
+      Market Closes: 23:30 IST
+      Pre-Close Entry Cutoff (T_close - 75m): 22:15 IST
+      Mandatory Intraday Flatten (T_close - 20m): 23:10 IST
+      COMEX Opening Range: 17:00 - 17:30 IST
+    - US Standard Time (Winter / EST):
+      Market Closes: 23:55 IST
+      Pre-Close Entry Cutoff (T_close - 75m): 22:40 IST
+      Mandatory Intraday Flatten (T_close - 20m): 23:35 IST
+      COMEX Opening Range: 18:00 - 18:30 IST
+    - Common:
+      Morning Session Open: 09:00 IST
+      Morning Opening Range: 09:00 - 09:15 IST
+    """
+    is_dst = is_us_dst(dt)
+    if is_dst:
+        close_t = time(23, 30)
+        cutoff_t = time(22, 15)
+        flatten_t = time(23, 10)
+        comex_start = time(17, 0)
+        comex_end = time(17, 30)
+    else:
+        close_t = time(23, 55)
+        cutoff_t = time(22, 40)
+        flatten_t = time(23, 35)
+        comex_start = time(18, 0)
+        comex_end = time(18, 30)
+
+    return {
+        "is_us_dst": is_dst,
+        "market_open": time(9, 0),
+        "market_close": close_t,
+        "entry_cutoff": cutoff_t,
+        "intraday_flatten": flatten_t,
+        "or_morning_start": time(9, 0),
+        "or_morning_end": time(9, 15),
+        "or_comex_start": comex_start,
+        "or_comex_end": comex_end,
+    }
+
+
+def calculate_session_anchored_vwap(
+    candles: list[Candle],
+    anchor_time: Optional[time] = None,
+) -> tuple[float, float]:
+    """Compute Session-Anchored VWAP and standard deviation (sigma_vwap).
+
+    If anchor_time is None, defaults to 09:00 IST.
+    Returns (vwap, sigma_vwap).
+    """
+    if not candles:
+        return 0.0, 0.0
+
+    target_d = candles[-1].timestamp.date() if hasattr(candles[-1].timestamp, "date") else None
+    anc_t = anchor_time or time(9, 0)
+
+    filtered = []
+    for c in candles:
+        c_ts = c.timestamp if c.timestamp.tzinfo else c.timestamp.replace(tzinfo=IST)
+        c_ist = c_ts.astimezone(IST)
+        if target_d is not None and c_ist.date() != target_d:
+            continue
+        if c_ist.time() >= anc_t:
+            filtered.append(c)
+
+    if not filtered:
+        filtered = candles
+
+    total_vol = sum(c.volume for c in filtered)
+    if total_vol > 0:
+        typical_prices = [(c.high + c.low + c.close) / 3.0 for c in filtered]
+        vwap = sum(tp * c.volume for tp, c in zip(typical_prices, filtered)) / total_vol
+        variance = sum(c.volume * ((tp - vwap) ** 2) for tp, c in zip(typical_prices, filtered)) / total_vol
+        sigma_vwap = math.sqrt(max(0.0, variance))
+        return vwap, sigma_vwap
+    else:
+        typical_prices = [(c.high + c.low + c.close) / 3.0 for c in filtered]
+        vwap = sum(typical_prices) / len(typical_prices)
+        variance = sum((tp - vwap) ** 2 for tp in typical_prices) / len(typical_prices)
+        sigma_vwap = math.sqrt(max(0.0, variance))
+        return vwap, sigma_vwap
+
+
+def detect_smt_divergence(
+    lead_candles: list[Candle],
+    sibling_candles: list[Candle],
+    lookback: int = 6,
+) -> tuple[Optional[str], str]:
+    """Detect Smart Money Technique (SMT) divergence between Gold and Silver.
+
+    - Bullish SMT Divergence ("BULLISH_SMT"):
+      One precious metal makes a lower low while the sibling holds a higher low.
+    - Bearish SMT Divergence ("BEARISH_SMT"):
+      One precious metal makes a higher high while the sibling holds a lower high.
+    """
+    comp_lead = [c for c in lead_candles if getattr(c, "is_complete", True)]
+    comp_sib = [c for c in sibling_candles if getattr(c, "is_complete", True)]
+
+    if len(comp_lead) < lookback + 1 or len(comp_sib) < lookback + 1:
+        return None, "Insufficient completed candles to evaluate SMT divergence"
+
+    curr_l = comp_lead[-1]
+    curr_s = comp_sib[-1]
+
+    prior_lead = comp_lead[-lookback - 1 : -1]
+    prior_sib = comp_sib[-lookback - 1 : -1]
+
+    lead_min_l = min(c.low for c in prior_lead)
+    lead_max_h = max(c.high for c in prior_lead)
+    sib_min_l = min(c.low for c in prior_sib)
+    sib_max_h = max(c.high for c in prior_sib)
+
+    lead_ll = curr_l.low < lead_min_l
+    sib_ll = curr_s.low < sib_min_l
+
+    lead_hh = curr_l.high > lead_max_h
+    sib_hh = curr_s.high > sib_max_h
+
+    # Bullish SMT: One makes lower low, other holds higher low
+    if lead_ll and not sib_ll:
+        return (
+            "BULLISH_SMT",
+            f"Bullish SMT: Lead swept low ({curr_l.low:.2f} < {lead_min_l:.2f}) while sibling held ({curr_s.low:.2f} >= {sib_min_l:.2f})",
+        )
+    if sib_ll and not lead_ll:
+        return (
+            "BULLISH_SMT",
+            f"Bullish SMT: Sibling swept low ({curr_s.low:.2f} < {sib_min_l:.2f}) while lead held ({curr_l.low:.2f} >= {lead_min_l:.2f})",
+        )
+
+    # Bearish SMT: One makes higher high, other holds lower high
+    if lead_hh and not sib_hh:
+        return (
+            "BEARISH_SMT",
+            f"Bearish SMT: Lead broke high ({curr_l.high:.2f} > {lead_max_h:.2f}) while sibling failed ({curr_s.high:.2f} <= {sib_max_h:.2f})",
+        )
+    if sib_hh and not lead_hh:
+        return (
+            "BEARISH_SMT",
+            f"Bearish SMT: Sibling broke high ({curr_s.high:.2f} > {sib_max_h:.2f}) while lead held ({curr_l.high:.2f} <= {lead_max_h:.2f})",
+        )
+
+    return None, "No SMT divergence detected"
 
 
 class MarketRegime(str, Enum):
@@ -141,6 +315,8 @@ class BenchmarkSnapshot:
     adx14: float
     prev_adx14: float
     ema50: float = 0.0
+    ci14: Optional[float] = None
+    sigma_vwap: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +357,16 @@ def evaluate_market_regime(
         ci_val = getattr(target, "ci14", None) or getattr(target, "choppiness_index", None)
         if ci_val is not None and float(ci_val) >= 50.0:
             return MarketRegime.WAITING
+
+        # Low ADX check (< 21.0 indicates congestion / waiting)
+        if getattr(target, "adx14", 25.0) < 21.0:
+            return MarketRegime.WAITING
+
+        # VWAP +/- 0.30 SD equilibrium check
+        sigma_vwap = getattr(target, "sigma_vwap", None) or getattr(target, "vwap_sd", None)
+        if sigma_vwap is not None and float(sigma_vwap) > 0 and target.session_vwap > 0:
+            if abs(target.close - target.session_vwap) <= 0.30 * float(sigma_vwap):
+                return MarketRegime.WAITING
 
         snapshot_slope = target.ema20 - target.prev_ema20
         adx_strong = target.adx14 >= min_adx
@@ -303,6 +489,30 @@ def evaluate_market_regime(
     latest_plus_di = plus_di_series[-1] if plus_di_series else None
     latest_minus_di = minus_di_series[-1] if minus_di_series else None
 
+    # Congestion filter: ADX < 21.0 triggers WAITING
+    if latest_adx < 21.0:
+        return RegimeEvaluation(
+            regime=MarketRegime.WAITING,
+            gate=GateResult(
+                name="MARKET_REGIME",
+                status=GateStatus.FAIL,
+                reason=f"ADX ({latest_adx:.1f}) < 21.0 indicates congestion/absence of trend; entering REGIME.WAITING",
+                data={
+                    "code": "ADX_BELOW_21",
+                    "adx": round(latest_adx, 2),
+                    "min_adx": 21.0,
+                    "close": latest_close,
+                },
+            ),
+            current_close=latest_close,
+            ema_20=latest_ema,
+            ema_50=latest_ema50,
+            ema_slope_val=slope,
+            adx_val=latest_adx,
+            plus_di=latest_plus_di,
+            minus_di=latest_minus_di,
+        )
+
     if getattr(config, "require_rising_adx", True):
         adx_rising = (latest_adx > prev_adx) if latest_adx < 28.0 else True
     else:
@@ -336,6 +546,31 @@ def evaluate_market_regime(
             else:
                 # Zero-volume index spot candles: compute Typical-Price Session TWAP
                 vwap_val = sum((c.high + c.low + c.close) / 3.0 for c in today_candles) / len(today_candles)
+
+            # Check VWAP +/- 0.30 SD equilibrium band
+            _, sigma_vwap = calculate_session_anchored_vwap(today_candles)
+            if sigma_vwap > 0 and vwap_val > 0 and abs(latest_close - vwap_val) <= 0.30 * sigma_vwap:
+                return RegimeEvaluation(
+                    regime=MarketRegime.WAITING,
+                    gate=GateResult(
+                        name="MARKET_REGIME",
+                        status=GateStatus.FAIL,
+                        reason=f"Price ({latest_close:.2f}) inside equilibrium band VWAP +/- 0.30 SD ([{vwap_val - 0.30*sigma_vwap:.2f}, {vwap_val + 0.30*sigma_vwap:.2f}]); entering REGIME.WAITING",
+                        data={
+                            "code": "VWAP_EQUILIBRIUM",
+                            "close": latest_close,
+                            "vwap": round(vwap_val, 2),
+                            "sigma_vwap": round(sigma_vwap, 2),
+                        },
+                    ),
+                    current_close=latest_close,
+                    ema_20=latest_ema,
+                    ema_50=latest_ema50,
+                    ema_slope_val=slope,
+                    adx_val=latest_adx,
+                    plus_di=latest_plus_di,
+                    minus_di=latest_minus_di,
+                )
 
             if vwap_val > 0:
                 if is_bullish and latest_close <= vwap_val:

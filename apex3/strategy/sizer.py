@@ -83,10 +83,10 @@ def calculate_mcx_intraday_charges(
 ) -> float:
     """Exact MCX + Zerodha commodity futures statutory fee calculator.
 
-    - Brokerage: 0.03% or ₹20 per order (whichever is lower)
+    - Brokerage: 0.03% or Rs. 20 per order (whichever is lower)
     - CTT: 0.01% on sell turnover only
     - MCX Exchange Turnover: 0.0021% on total turnover
-    - SEBI Fee: 0.0001% (₹10/Crore) on total turnover
+    - SEBI Fee: 0.0001% (Rs. 10/Crore) on total turnover
     - Stamp Duty: 0.002% on buy turnover
     - GST: 18% on (Brokerage + Exchange Turnover + SEBI Fee)
     """
@@ -386,11 +386,11 @@ def size_position(
             gate=GateResult(
                 name="SIZING_QUANTITY",
                 status=GateStatus.FAIL,
-                reason=f"Risk constraints (stop-loss + statutory friction) exceed risk cap ₹{trade_risk_rupees:.2f} even at minimum lot {lot_size}",
+                reason=f"Risk constraints (stop-loss + statutory friction) exceed risk cap Rs. {trade_risk_rupees:.2f} even at minimum lot {lot_size}",
                 data={"q_notional": q_notional, "q_risk": q_risk, "q_margin": q_margin},
             ),
             rejection_code="EXCEEDED_NET_RISK_CAP",
-            rejection_reason=f"Total stop-loss risk with statutory charges exceeds ₹{trade_risk_rupees:.2f}",
+            rejection_reason=f"Total stop-loss risk with statutory charges exceeds Rs. {trade_risk_rupees:.2f}",
         )
 
     # Gate: Reject trade if charges consume > 18% of expected 2.0R gross profit
@@ -420,7 +420,7 @@ def size_position(
             gate=GateResult(
                 name="FEE_TO_PROFIT_RATIO",
                 status=GateStatus.FAIL,
-                reason=f"Estimated charges (₹{est_charges:.2f}) exceed {max_fee_ratio*100:.0f}% of expected 2.0R gross profit (₹{expected_2r_gross_profit:.2f}, {fee_pct:.1f}%)",
+                reason=f"Estimated charges (Rs. {est_charges:.2f}) exceed {max_fee_ratio*100:.0f}% of expected 2.0R gross profit (Rs. {expected_2r_gross_profit:.2f}, {fee_pct:.1f}%)",
                 data={"charges": est_charges, "expected_profit": expected_2r_gross_profit, "ratio": est_charges / expected_2r_gross_profit if expected_2r_gross_profit > 0 else 1.0},
             ),
             rejection_code="EXCEEDED_FEE_TO_PROFIT_LIMIT",
@@ -450,7 +450,7 @@ def size_position(
         gate=GateResult(
             name="SIZING_QUANTITY",
             status=GateStatus.PASS,
-            reason=f"Sized {q_final} lots (Notional: ₹{notional_value:,.2f}, Realized Stop Risk: ₹{actual_trade_risk:,.2f})",
+            reason=f"Sized {q_final} lots (Notional: Rs. {notional_value:,.2f}, Realized Stop Risk: Rs. {actual_trade_risk:,.2f})",
             data={"quantity": q_final, "notional": notional_value, "risk": actual_trade_risk},
         ),
     )

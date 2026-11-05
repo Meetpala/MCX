@@ -52,6 +52,9 @@ class StopEvaluation:
     reason: str
     is_exhaustion: bool = False
     is_late_session: bool = False
+    hwm_price: float = 0.0
+    hwm_r: float = 0.0
+    ratchet_stage: int = 0
 
 
 TICK_SIZE = 0.05
@@ -215,22 +218,23 @@ def evaluate_progressive_ratchet(
     tick_size: float = 1.0,
     macro_state: Optional[Any] = None,
 ) -> StopEvaluation:
-    """Evaluate 4-Stage Progressive Ratchet Trailing Stop for MCX Precious Metals.
+    """Evaluate 5-Stage Progressive Ratchet Trailing Stop for MCX Precious Metals.
 
     Stages:
-    - Stage 0 (< 1.0R): Maintain initial structural stop.
-    - Stage 1 (>= 1.0R): Move to BE+ (covers round-trip statutory costs + buffer ticks).
-    - Stage 2 (>= 1.5R): Lock +0.65R profit floor.
-    - Stage 3 (>= 2.0R): Lock +1.25R profit floor.
-    - Stage 4 (>= 2.5R+): Dynamic step ratchet and 1.25x ATR trail from peak.
+    - Stage 0 (< 1.0R): Maintain initial structural stop SL_0.
+    - Stage 1 (>= 1.0R): Move to BE+ (Fill +/- max(Charges/(Q*M) + 3 ticks, 0.18R)).
+    - Stage 2 (1.4R to 2.0R): +0.65R lock at 1.40R; steps to +0.95R lock at 1.75R.
+    - Stage 3 (2.0R to 3.2R): Multi-R Trend Ratchet: max(Fill + (HWM_R - 0.65R), SwingLow_3 - 0.35*ATR_14).
+    - Stage 4 (>= 3.2R or Climax): Parabolic Harvest: max(Fill + (HWM_R - 0.35R), L_prev - 2 ticks, HWM - 0.55*ATR_14).
 
-    Throttled by config.ratchet.max_stop_modifications (default: 20).
-    Enforces strict monotonicity (long stop never retreats, short stop never advances).
+    Strict monotonicity: BUY stop never retreats, SELL stop never advances.
+    Minimum modification step: max(3 ticks, 0.12R).
+    Modification budget cap: 20 modifications per order.
     """
     entry_price = pos.average_entry
     initial_stop = pos.initial_stop_price if pos.initial_stop_price > 0 else pos.protective_stop_price
     current_stop = pos.protective_stop_price if pos.protective_stop_price > 0 else initial_stop
-    mod_count = getattr(pos, "modification_count", 0)
+    mod_count = getattr(pos, "modification_count", 0) or getattr(pos, "stop_modification_count", 0)
 
     # Resolve ratchet configuration
     if hasattr(config, "ratchet"):
@@ -243,15 +247,6 @@ def evaluate_progressive_ratchet(
         ratchet_cfg = None
 
     max_mods = getattr(ratchet_cfg, "max_stop_modifications", 20) if ratchet_cfg else 20
-    stage1_r = getattr(ratchet_cfg, "stage1_r", 1.00) if ratchet_cfg else 1.00
-    stage1_buffer_ticks = getattr(ratchet_cfg, "stage1_buffer_ticks", 2) if ratchet_cfg else 2
-    stage2_r = getattr(ratchet_cfg, "stage2_r", 1.50) if ratchet_cfg else 1.50
-    stage2_lock_r = getattr(ratchet_cfg, "stage2_lock_r", 0.65) if ratchet_cfg else 0.65
-    stage3_r = getattr(ratchet_cfg, "stage3_r", 2.00) if ratchet_cfg else 2.00
-    stage3_lock_r = getattr(ratchet_cfg, "stage3_lock_r", 1.25) if ratchet_cfg else 1.25
-    stage4_r = getattr(ratchet_cfg, "stage4_r", 2.50) if ratchet_cfg else 2.50
-    stage4_step_r = getattr(ratchet_cfg, "stage4_step_r", 0.50) if ratchet_cfg else 0.50
-
     t_size = tick_size if (tick_size and tick_size > 0) else getattr(pos, "tick_size", 1.0)
     if t_size <= 0:
         t_size = 1.0
@@ -268,75 +263,108 @@ def evaluate_progressive_ratchet(
             trail_activated=False,
             modification_count=mod_count,
             reason="Invalid position entry or initial stop",
+            hwm_price=current_price,
+            hwm_r=0.0,
+            ratchet_stage=0,
         )
 
-    # 1. Update Peak / High-Water Mark / Low-Water Mark
     is_long = (pos.side == Side.BUY)
-    if is_long:
-        hwm = max(pos.best_favorable_price, current_price, entry_price)
-        best_favorable = hwm
-        favorable_excursion = best_favorable - entry_price
-    else:
-        lwm = min(pos.best_favorable_price, current_price, entry_price) if pos.best_favorable_price > 0 else min(current_price, entry_price)
-        best_favorable = lwm
-        favorable_excursion = entry_price - best_favorable
-
     unit_risk_1r = abs(entry_price - initial_stop)
     if unit_risk_1r <= 0:
         unit_risk_1r = max(1.0, 2.0 * t_size)
 
-    r_peak = favorable_excursion / unit_risk_1r if unit_risk_1r > 0 else 0.0
+    # 1. Update High-Water Mark / Best Favorable Price
+    existing_hwm_price = getattr(pos, "hwm_price", 0.0) or pos.best_favorable_price
+    if is_long:
+        hwm_price = max(existing_hwm_price, current_price, entry_price)
+        favorable_excursion = hwm_price - entry_price
+    else:
+        if existing_hwm_price > 0:
+            hwm_price = min(existing_hwm_price, current_price, entry_price)
+        else:
+            hwm_price = min(current_price, entry_price)
+        favorable_excursion = entry_price - hwm_price
+
+    hwm_r = favorable_excursion / unit_risk_1r if unit_risk_1r > 0 else 0.0
 
     # 2. Stage Evaluation
     candidate_sl = current_stop
-    stage_name = "Stage 0 (Initial Breathing)"
+    stage_name = "Stage 0 (Structural Breathing Room)"
+    ratchet_stage = 0
     trail_activated = False
 
+    stage1_buffer_ticks = getattr(ratchet_cfg, "stage1_buffer_ticks", 2) if ratchet_cfg else 2
+    min_be_r = getattr(ratchet_cfg, "stage1_min_be_r", 0.0) if ratchet_cfg else 0.0
+
     lot_mult = getattr(pos, "lot_multiplier", 1) or get_mcx_lot_multiplier(pos.symbol)
-    charges_1lot = calculate_mcx_intraday_charges(entry_price, entry_price, 1, lot_mult)
-    charge_offset_pts = math.ceil((charges_1lot / max(1, lot_mult)) / t_size) * t_size
-    be_offset = charge_offset_pts + (stage1_buffer_ticks * t_size)
+    qty = max(1, getattr(pos, "quantity", 1))
+    charges_all = calculate_mcx_intraday_charges(entry_price, entry_price, qty, lot_mult)
+    charge_offset_pts = math.ceil((charges_all / (qty * lot_mult)) / t_size) * t_size
+    be_offset = max(charge_offset_pts + (stage1_buffer_ticks * t_size), min_be_r * unit_risk_1r)
 
-    if r_peak >= stage4_r:
-        stage_name = "Stage 4 (Step Ratchet & ATR Trail)"
-        trail_activated = True
-        excess_r = r_peak - stage4_r
-        step_acc = math.floor(excess_r / stage4_step_r) * stage4_step_r if stage4_step_r > 0 else excess_r
-        if is_long:
-            ratchet_floor = entry_price + (stage3_lock_r * unit_risk_1r) + (step_acc * unit_risk_1r)
-            atr_trail = best_favorable - (1.25 * atr_14)
-            candidate_sl = max(ratchet_floor, atr_trail)
-        else:
-            ratchet_floor = entry_price - (stage3_lock_r * unit_risk_1r) - (step_acc * unit_risk_1r)
-            atr_trail = best_favorable + (1.25 * atr_14)
-            candidate_sl = min(ratchet_floor, atr_trail)
+    completed = [c for c in candles_5m if getattr(c, "is_complete", True)]
+    prior_c = completed[-2] if len(completed) >= 2 else (completed[-1] if completed else None)
 
-    elif r_peak >= stage3_r:
-        stage_name = "Stage 3 (+1.25R Profit Lock)"
+    # Stage 4 (Parabolic / Climax Harvest):
+    # HWM_R >= 3.20R or Climax
+    if hwm_r >= 3.20:
+        ratchet_stage = 4
+        stage_name = "Stage 4 (Parabolic / Climax Harvest)"
         trail_activated = True
         if is_long:
-            candidate_sl = entry_price + (stage3_lock_r * unit_risk_1r)
+            ratchet_floor = entry_price + ((hwm_r - 0.35) * unit_risk_1r)
+            prior_low_trail = (prior_c.low - 2.0 * t_size) if prior_c else ratchet_floor
+            atr_trail = hwm_price - (0.55 * atr_14)
+            candidate_sl = ceil_to_tick(max(ratchet_floor, prior_low_trail, atr_trail), tick=t_size)
         else:
-            candidate_sl = entry_price - (stage3_lock_r * unit_risk_1r)
+            ratchet_floor = entry_price - ((hwm_r - 0.35) * unit_risk_1r)
+            prior_high_trail = (prior_c.high + 2.0 * t_size) if prior_c else ratchet_floor
+            atr_trail = hwm_price + (0.55 * atr_14)
+            candidate_sl = floor_to_tick(min(ratchet_floor, prior_high_trail, atr_trail), tick=t_size)
 
-    elif r_peak >= stage2_r:
-        stage_name = "Stage 2 (+0.65R Profit Lock)"
+    elif hwm_r >= 2.00:
+        ratchet_stage = 3
+        stage_name = "Stage 3 (Multi-R Trend Ratchet)"
         trail_activated = True
         if is_long:
-            candidate_sl = entry_price + (stage2_lock_r * unit_risk_1r)
+            ratchet_floor = entry_price + ((hwm_r - 0.65) * unit_risk_1r)
+            if len(completed) >= 3:
+                swing_low_3 = min(c.low for c in completed[-3:])
+                swing_trail = swing_low_3 - (0.35 * atr_14)
+            else:
+                swing_trail = ratchet_floor
+            candidate_sl = ceil_to_tick(max(ratchet_floor, swing_trail), tick=t_size)
         else:
-            candidate_sl = entry_price - (stage2_lock_r * unit_risk_1r)
+            ratchet_floor = entry_price - ((hwm_r - 0.65) * unit_risk_1r)
+            if len(completed) >= 3:
+                swing_high_3 = max(c.high for c in completed[-3:])
+                swing_trail = swing_high_3 + (0.35 * atr_14)
+            else:
+                swing_trail = ratchet_floor
+            candidate_sl = floor_to_tick(min(ratchet_floor, swing_trail), tick=t_size)
 
-    elif r_peak >= stage1_r:
+    elif hwm_r >= 1.40:
+        ratchet_stage = 2
+        stage_name = "Stage 2 ('Little-Ahead' Profit Cushion)"
+        trail_activated = True
+        lock_r = 0.95 if hwm_r >= 1.75 else 0.65
+        if is_long:
+            candidate_sl = ceil_to_tick(entry_price + (lock_r * unit_risk_1r), tick=t_size)
+        else:
+            candidate_sl = floor_to_tick(entry_price - (lock_r * unit_risk_1r), tick=t_size)
+
+    elif hwm_r >= 1.00:
+        ratchet_stage = 1
         stage_name = "Stage 1 (Breakeven+)"
         trail_activated = True
         if is_long:
-            candidate_sl = entry_price + be_offset
+            candidate_sl = ceil_to_tick(entry_price + be_offset, tick=t_size)
         else:
-            candidate_sl = entry_price - be_offset
+            candidate_sl = floor_to_tick(entry_price - be_offset, tick=t_size)
 
     else:
-        stage_name = "Stage 0 (Initial Breathing)"
+        ratchet_stage = 0
+        stage_name = "Stage 0 (Structural Breathing Room)"
         candidate_sl = initial_stop
 
     # Pre-Event Shield & Opposing Breaking Shock Tightener
@@ -351,10 +379,9 @@ def evaluate_progressive_ratchet(
 
     be_threshold_r = float(getattr(news_cfg, "pre_event_lock_be_threshold_r", 0.75) if news_cfg else 0.75)
     opposing_thresh = float(getattr(news_cfg, "opposing_shock_threshold", 0.75) if news_cfg else 0.75)
-    be_plus = (entry_price + be_offset) if is_long else (entry_price - be_offset)
+    be_plus = ceil_to_tick(entry_price + be_offset, tick=t_size) if is_long else floor_to_tick(entry_price - be_offset, tick=t_size)
 
     if macro_state is not None:
-        # Pre-Event Shield: if 0 < minutes_to_next_high_event <= 5.0 and current_r >= 0.75R
         mins = getattr(macro_state, "minutes_to_next_high_event", None)
         if mins is not None and 0.0 < mins <= 5.0 and current_r >= be_threshold_r:
             if is_long:
@@ -364,16 +391,15 @@ def evaluate_progressive_ratchet(
             stage_name = "Pre-Event Shield (BE+)"
             trail_activated = True
 
-        # Opposing Breaking Shock Tightener:
         m_score = getattr(macro_state, "macro_score", 0.0)
         if current_r >= 0.50:
             if is_long and m_score <= -opposing_thresh:
-                shock_sl = round_to_tick(current_price - (0.5 * atr_14), tick_size=t_size, round_up=False)
+                shock_sl = floor_to_tick(current_price - (0.5 * atr_14), tick=t_size)
                 candidate_sl = max(candidate_sl, be_plus, shock_sl)
                 stage_name = "Opposing Shock Tightener"
                 trail_activated = True
             elif not is_long and m_score >= opposing_thresh:
-                shock_sl = round_to_tick(current_price + (0.5 * atr_14), tick_size=t_size, round_up=True)
+                shock_sl = ceil_to_tick(current_price + (0.5 * atr_14), tick=t_size)
                 candidate_sl = min(candidate_sl, be_plus, shock_sl)
                 stage_name = "Opposing Shock Tightener"
                 trail_activated = True
@@ -383,17 +409,17 @@ def evaluate_progressive_ratchet(
         best_sl = max(current_stop, candidate_sl)
         market_cap = current_price - (2.0 * t_size)
         best_sl = min(best_sl, market_cap) if current_price > market_cap else best_sl
-        final_stop = round_to_tick(best_sl, tick_size=t_size, round_up=False)
+        final_stop = floor_to_tick(best_sl, tick=t_size)
         improvement = final_stop - current_stop
     else:
         best_sl = min(current_stop, candidate_sl)
         market_cap = current_price + (2.0 * t_size)
         best_sl = max(best_sl, market_cap) if current_price < market_cap else best_sl
-        final_stop = round_to_tick(best_sl, tick_size=t_size, round_up=True)
+        final_stop = ceil_to_tick(best_sl, tick=t_size)
         improvement = current_stop - final_stop
 
-    # 4. Check modification headroom / limit
-    min_step = 2.0 * t_size
+    # 4. Modification step size: max(3 ticks, 0.12R)
+    min_step = max(3.0 * t_size, 0.12 * unit_risk_1r)
     is_improvement_sufficient = improvement >= min_step
 
     if mod_count >= max_mods:
@@ -401,10 +427,13 @@ def evaluate_progressive_ratchet(
         reason = f"Max modification cap ({max_mods}) reached; stop unchanged at {current_stop}"
     elif is_improvement_sufficient:
         should_modify = True
-        reason = f"Ratchet update ({stage_name}): {current_stop} -> {final_stop} (R_peak={r_peak:.2f}R)"
+        reason = f"Ratchet update ({stage_name}): {current_stop} -> {final_stop} (HWM_R={hwm_r:.2f}R)"
     else:
         should_modify = False
         reason = f"Improvement {improvement:.2f} < min step {min_step:.2f}; stop unchanged"
+
+    if not should_modify:
+        final_stop = current_stop
 
     # Compute trigger and limit
     trigger, limit = calculate_stop_limit_prices(
@@ -420,27 +449,73 @@ def evaluate_progressive_ratchet(
         current_stop=current_stop,
         trigger_price=trigger,
         limit_price=limit,
-        r_multiple=r_peak,
-        best_favorable_price=best_favorable,
+        r_multiple=hwm_r,
+        best_favorable_price=hwm_price,
         trail_activated=trail_activated,
         modification_count=mod_count,
         reason=reason,
+        hwm_price=hwm_price,
+        hwm_r=hwm_r,
+        ratchet_stage=ratchet_stage,
     )
 
 
+def calculate_mcx_initial_stop(
+    side: Union[Side, str],
+    entry_price: float,
+    swing_low_5: float,
+    swing_high_5: float,
+    atr14: float,
+    signal_high: Optional[float] = None,
+    signal_low: Optional[float] = None,
+    tick_size: float = 1.0,
+) -> tuple[float, float, float]:
+    """Calculate structural initial stop for MCX Bullion Futures with sweet-spot validation.
+
+    Formula:
+    - Long (BUY): floor_to_tick(min(swing_low_5, signal_low) - 1.35 * atr14, tick)
+    - Short (SELL): ceil_to_tick(max(swing_high_5, signal_high) + 1.35 * atr14, tick)
+    - Sweet spot gate: 0.18% <= stop_width_pct <= 0.65%
+
+    Returns:
+        (initial_stop, risk_per_share_1r, stop_width_pct)
+    """
+    side_str = side.value if hasattr(side, "value") else str(side).upper()
+    is_buy = side_str in ("BUY", "LONG")
+
+    s_low = min(swing_low_5, signal_low) if signal_low is not None else swing_low_5
+    s_high = max(swing_high_5, signal_high) if signal_high is not None else swing_high_5
+
+    if is_buy:
+        raw_stop = s_low - (1.35 * atr14)
+        if raw_stop >= entry_price:
+            raw_stop = entry_price - (atr14 * 1.0)
+        initial_stop = floor_to_tick(raw_stop, tick=tick_size)
+        risk_per_share = entry_price - initial_stop
+    else:
+        raw_stop = s_high + (1.35 * atr14)
+        if raw_stop <= entry_price:
+            raw_stop = entry_price + (atr14 * 1.0)
+        initial_stop = ceil_to_tick(raw_stop, tick=tick_size)
+        risk_per_share = initial_stop - entry_price
+
+    stop_width_pct = (risk_per_share / entry_price) if entry_price > 0 else 0.0
+    return initial_stop, risk_per_share, stop_width_pct
+
+
 def calculate_initial_stop(
-    side: Side,
+    side: Union[Side, str],
     entry_price: float,
     signal_low: float,
     signal_high: float,
     atr_value: float,
-    config: StopsConfig,
+    config: Optional[StopsConfig] = None,
     tick_size: float = 0.05,
 ) -> float:
     """Calculate initial protective stop beyond the signal candle / swing with ATR pad.
 
     Args:
-        side: BUY or SELL
+        side: BUY or SELL (enum or str)
         entry_price: Expected or fill entry price
         signal_low: Low of the signal bar / swing low
         signal_high: High of the signal bar / swing high
@@ -451,9 +526,11 @@ def calculate_initial_stop(
     Returns:
         Initial stop price rounded in protective direction.
     """
-    pad = config.initial_atr_multiplier * atr_value
+    atr_mult = getattr(config, "initial_atr_multiplier", 1.35) if config is not None else 1.35
+    pad = atr_mult * atr_value
 
-    if side == Side.BUY:
+    side_str = side.value if hasattr(side, "value") else str(side).upper()
+    if side_str in ("BUY", "LONG"):
         # Stop below the signal low
         raw_stop = signal_low - pad
         # Must be below entry price
@@ -461,7 +538,7 @@ def calculate_initial_stop(
             raw_stop = entry_price - (atr_value * 1.0)
         # Round down (more protective for long)
         return round_to_tick(raw_stop, tick_size=tick_size, round_up=False)
-    else:  # Side.SELL
+    else:  # SELL / SHORT
         # Stop above the signal high
         raw_stop = signal_high + pad
         # Must be above entry price
