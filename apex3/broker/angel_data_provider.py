@@ -295,6 +295,9 @@ class AngelDataProvider:
     def resolve_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve exchange symbol token for Angel One. Fails closed on unmapped symbols."""
         clean = symbol.replace("-EQ", "").upper()
+        if exchange != "MCX" and clean.startswith(("SILVER", "GOLD")):
+            exchange = "MCX"
+
         # For equity, cached tokens are static; for MCX futures, dynamically resolve front-month
         if exchange != "MCX" and clean in self._token_cache:
             return self._token_cache[clean]
@@ -307,12 +310,14 @@ class AngelDataProvider:
                         fut_matches = [
                             item for item in res["data"]
                             if isinstance(item, dict)
-                            and str(item.get("tradingsymbol", "")).upper().startswith(clean)
-                            and str(item.get("tradingsymbol", "")).upper().endswith("FUT")
+                            and (str(item.get("tradingsymbol", "")).upper() == clean
+                                 or (str(item.get("tradingsymbol", "")).upper().startswith(clean)
+                                     and str(item.get("tradingsymbol", "")).upper().endswith("FUT")))
                         ]
                         if fut_matches:
-                            # Select nearest contract (sort by tradingsymbol or token)
-                            tok = str(fut_matches[0].get("symboltoken", "")).strip()
+                            exact = [m for m in fut_matches if str(m.get("tradingsymbol", "")).upper() == clean]
+                            target_match = exact[0] if exact else fut_matches[0]
+                            tok = str(target_match.get("symboltoken", "")).strip()
                             if tok:
                                 self._token_cache[clean] = tok
                                 return tok
@@ -400,15 +405,18 @@ class AngelDataProvider:
         now_ist = datetime.now(IST)
 
         clean_symbols = [s.replace("-EQ", "").upper() for s in symbols]
-        tokens_map: dict[str, str] = {}
+        tokens_by_exchange: dict[str, dict[str, str]] = {}
         for sym in clean_symbols:
-            tok = self.resolve_token(sym, exchange)
+            eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
+            tok = self.resolve_token(sym, eff_exch)
             if tok:
-                tokens_map[tok] = sym
+                if eff_exch not in tokens_by_exchange:
+                    tokens_by_exchange[eff_exch] = {}
+                tokens_by_exchange[eff_exch][tok] = sym
             else:
                 quotes[sym] = Quote(
                     symbol=sym,
-                    exchange=exchange,
+                    exchange=eff_exch,
                     last_price=0.0,
                     bid=0.0,
                     ask=0.0,
@@ -417,12 +425,13 @@ class AngelDataProvider:
                     is_fresh=False,
                 )
 
-        if not tokens_map or not self._smart_api:
+        if not tokens_by_exchange or not self._smart_api:
             for sym in clean_symbols:
                 if sym not in quotes:
+                    eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
                     quotes[sym] = Quote(
                         symbol=sym,
-                        exchange=exchange,
+                        exchange=eff_exch,
                         last_price=0.0,
                         bid=0.0,
                         ask=0.0,
@@ -432,15 +441,17 @@ class AngelDataProvider:
                     )
             return quotes
 
+        total_tokens = sum(len(m) for m in tokens_by_exchange.values())
         if self._rate_limiter:
             acquired = self._rate_limiter.acquire("quotes", timeout=2.0)
             if not acquired:
-                logger.warning("Rate limit timeout acquiring quotes token for batch (%d symbols)", len(tokens_map))
+                logger.warning("Rate limit timeout acquiring quotes token for batch (%d symbols)", total_tokens)
                 for sym in clean_symbols:
                     if sym not in quotes:
+                        eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
                         quotes[sym] = Quote(
                             symbol=sym,
-                            exchange=exchange,
+                            exchange=eff_exch,
                             last_price=0.0,
                             bid=0.0,
                             ask=0.0,
@@ -450,31 +461,32 @@ class AngelDataProvider:
                         )
                 return quotes
 
-        token_list = list(tokens_map.keys())
-        chunk_size = 50
-        for i in range(0, len(token_list), chunk_size):
-            chunk = token_list[i : i + chunk_size]
-            try:
-                if hasattr(self._smart_api, "getMarketData"):
-                    m_data = self._smart_api.getMarketData(
-                        mode="FULL",
-                        exchangeTokens={exchange: chunk},
-                    )
-                    if m_data and m_data.get("status") and "data" in m_data:
-                        fetched = m_data["data"].get("fetched", [])
-                        for item in fetched:
-                            tok = str(item.get("symbolToken", ""))
-                            sym = tokens_map.get(tok)
-                            if not sym:
-                                ts = str(item.get("tradingSymbol", "")).replace("-EQ", "").upper()
-                                if ts in clean_symbols:
-                                    sym = ts
-                            if not sym and len(chunk) == 1 and len(clean_symbols) == 1:
-                                sym = clean_symbols[0]
-                            if sym:
-                                quotes[sym] = self._parse_market_item(item, sym, exchange)
-            except Exception as e:
-                logger.error("Error in getMarketData batch chunk: %s", e)
+        for exch, exch_tokens in tokens_by_exchange.items():
+            token_list = list(exch_tokens.keys())
+            chunk_size = 50
+            for i in range(0, len(token_list), chunk_size):
+                chunk = token_list[i : i + chunk_size]
+                try:
+                    if hasattr(self._smart_api, "getMarketData"):
+                        m_data = self._smart_api.getMarketData(
+                            mode="FULL",
+                            exchangeTokens={exch: chunk},
+                        )
+                        if m_data and m_data.get("status") and "data" in m_data:
+                            fetched = m_data["data"].get("fetched", [])
+                            for item in fetched:
+                                tok = str(item.get("symbolToken", ""))
+                                sym = exch_tokens.get(tok)
+                                if not sym:
+                                    ts = str(item.get("tradingSymbol", "")).replace("-EQ", "").upper()
+                                    if ts in clean_symbols:
+                                        sym = ts
+                                if not sym and len(chunk) == 1 and len(clean_symbols) == 1:
+                                    sym = clean_symbols[0]
+                                if sym:
+                                    quotes[sym] = self._parse_market_item(item, sym, exch)
+                except Exception as e:
+                    logger.error("Error in getMarketData batch chunk (%s): %s", exch, e)
 
         # Fallback for any symbols missing in batch response
         for sym in clean_symbols:
@@ -520,7 +532,8 @@ class AngelDataProvider:
     ) -> list[Candle]:
         """Fetch historical candles from Angel One."""
         clean = symbol.replace("-EQ", "").upper()
-        token = self.resolve_token(clean, exchange)
+        eff_exch = "MCX" if clean.startswith(("SILVER", "GOLD")) else exchange
+        token = self.resolve_token(clean, eff_exch)
 
         if from_dt is None:
             from_dt = datetime.now(IST) - timedelta(days=5)
@@ -576,7 +589,7 @@ class AngelDataProvider:
 
             try:
                 hist_params = {
-                    "exchange": exchange,
+                    "exchange": eff_exch,
                     "symboltoken": token,
                     "interval": angel_interval,
                     "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),

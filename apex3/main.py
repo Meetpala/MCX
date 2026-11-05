@@ -204,6 +204,11 @@ def run_app():
     # Initialize Strategy Engine
     engine = StrategyEngine(config=config, broker=broker, journal=journal, trade_logger=trade_logger)
 
+    if config.exchange.upper() == "MCX":
+        mcx_universe = [item.symbol_root for item in config.universe.core_watchlist] or ["SILVERMIC", "GOLDGUINEA", "GOLDTEN"]
+        engine.set_manual_symbols(mcx_universe)
+        logger.info("AURUM-APEX MCX Engine Activated: Scanned watchlist set to %s", mcx_universe)
+
     if config.mode == "live":
         if broker.is_session_valid():
             from apex3.reconciliation.reconciler import Reconciler
@@ -217,7 +222,7 @@ def run_app():
             )
             radar_cfg = getattr(config, "raw_dict", {}).get("radar", {}) if hasattr(config, "raw_dict") else {}
             watched = list(radar_cfg.get("core_watchlist", [])) + list(radar_cfg.get("extended_pool", []))
-            if not watched:
+            if not watched or config.exchange.upper() == "MCX":
                 watched = list(config.watchlist.symbols) + list(config.watchlist.scanner_universe)
             rec_status = reconciler.audit_startup_state(watched_symbols=watched, reattach_stops=True)
             if not rec_status.is_clean:

@@ -594,7 +594,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 
     return AppConfig(
         mode=str(os.environ.get("TRADING_MODE") or os.environ.get("APEX3_MODE") or raw.get("mode", "paper")).lower().strip(),
-        paper_starting_capital=float(acc_raw.get("starting_capital", raw.get("paper_starting_capital", base_cap))),
+        paper_starting_capital=float(base_cap if exchange.upper() == "MCX" else acc_raw.get("starting_capital", raw.get("paper_starting_capital", base_cap))),
         exchange=exchange,
         margin_segment=margin_segment,
         fetch_live_zerodha_margin=fetch_live_margin,

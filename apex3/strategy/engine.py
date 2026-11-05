@@ -1949,8 +1949,10 @@ class StrategyEngine:
             s_candles = self.broker.get_historical(sym, "5minute", hist_from_5m, now)
             stock_candles_map[sym] = s_candles
             # Pre-build/cache opening range so late starts (e.g. 09:50 IST) reconstruct immediately
-            if sym not in self.opening_ranges or not self.opening_ranges[sym].is_complete:
-                self.opening_ranges[sym] = build_opening_range(sym, s_candles, session_date=session_date)
+            if s_candles and (sym not in self.opening_ranges or not self.opening_ranges[sym].is_complete):
+                built_or = build_opening_range(sym, s_candles, session_date=session_date)
+                if built_or.is_complete or built_or.candle_count > 0:
+                    self.opening_ranges[sym] = built_or
 
         # 2. Batch-fetch quotes IMMEDIATELY AFTER historical pre-warm so quotes are ultra-fresh (< 0.2s old)
         all_symbols_to_quote = [self.config.regime.benchmark_symbol] + [s for s in symbols if s != self.config.regime.benchmark_symbol]
