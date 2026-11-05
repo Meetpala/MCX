@@ -559,7 +559,9 @@ class AngelDataProvider:
             bar_bucket = int(now_ts) // 300
 
         # Check short-term candle cache to prevent burst exhaustion
-        cache_key = (clean, interval)
+        # Cache key MUST include the requested window start; otherwise a late-start / history request would be
+        # served the candles of an earlier, shorter window within the same 5m bar.
+        cache_key = (clean, interval, from_dt.strftime("%Y%m%d%H"))
         now_mono = time.monotonic()
         if cache_key in self._candle_cache:
             cached_t, cached_bucket, cached_candles = self._candle_cache[cache_key]
@@ -651,13 +653,19 @@ class AngelDataProvider:
         today = as_of or datetime.now(IST).date()
         scrip_list = scrip_master or []
         if not scrip_list and self._smart_api and self._auth_token and hasattr(self._smart_api, "searchScrip"):
-            for root in symbol_roots:
-                try:
-                    res = self._smart_api.searchScrip("MCX", root)
-                    if isinstance(res, dict) and res.get("status") and isinstance(res.get("data"), list):
-                        scrip_list.extend(res["data"])
-                except Exception as e:
-                    logger.warning("searchScrip failed for root %s: %s", root, e)
+            for idx, root in enumerate(symbol_roots):
+                # Angel's searchScrip is aggressively rate-limited: pace calls and retry with backoff.
+                if idx > 0:
+                    time.sleep(1.1)
+                for attempt in range(3):
+                    try:
+                        res = self._smart_api.searchScrip("MCX", root)
+                        if isinstance(res, dict) and res.get("status") and isinstance(res.get("data"), list):
+                            scrip_list.extend(res["data"])
+                        break
+                    except Exception as e:
+                        logger.warning("searchScrip failed for root %s (attempt %d/3): %s", root, attempt + 1, e)
+                        time.sleep(1.5 * (attempt + 1))
 
         resolved_raw = resolve_active_mcx_futures(scrip_list, symbol_roots, min_days_to_expiry, today)
         results: dict[str, InstrumentInfo] = {}

@@ -1,0 +1,24 @@
+﻿=== MORNING_ONLY | sessions=morning max_trades=2 target_r=3.5 stop%=[0.18,0.65] ===
+ALL        n= 59 win=49.2% gross=Rs    6,643 charges=Rs   5,158 NET=Rs    1,485 PF=1.26 avgR=+0.04 avgRisk=Rs1186 maxDD=Rs8,668
+MORNING    n= 59 win=49.2% gross=Rs    6,643 charges=Rs   5,158 NET=Rs    1,485 PF=1.26 avgR=+0.04 avgRisk=Rs1186 maxDD=Rs8,668
+COMEX: no trades
+BUY        n= 29 win=44.8% gross=Rs    2,702 charges=Rs   2,543 NET=Rs      159 PF=1.19 avgR=-0.06 avgRisk=Rs1211 maxDD=Rs8,421
+SELL       n= 30 win=53.3% gross=Rs    3,941 charges=Rs   2,615 NET=Rs    1,326 PF=1.34 avgR=+0.12 avgRisk=Rs1161 maxDD=Rs4,015
+IN<2026-09-07 n= 34 win=44.1% gross=Rs      596 charges=Rs   3,010 NET=Rs   -2,414 PF=1.03 avgR=-0.03 avgRisk=Rs1260 maxDD=Rs8,668
+OUT>=2026-09-07 n= 25 win=56.0% gross=Rs    6,047 charges=Rs   2,148 NET=Rs    3,899 PF=1.70 avgR=+0.12 avgRisk=Rs1085 maxDD=Rs2,937
+=== ONE_TRADE | sessions=both max_trades=1 target_r=3.5 stop%=[0.18,0.65] ===
+ALL        n=115 win=47.0% gross=Rs    2,718 charges=Rs  10,069 NET=Rs   -7,351 PF=1.05 avgR=-0.05 avgRisk=Rs1229 maxDD=Rs20,235
+MORNING    n= 58 win=48.3% gross=Rs    6,556 charges=Rs   5,072 NET=Rs    1,484 PF=1.25 avgR=+0.04 avgRisk=Rs1187 maxDD=Rs8,668
+COMEX      n= 57 win=45.6% gross=Rs   -3,838 charges=Rs   4,997 NET=Rs   -8,835 PF=0.88 avgR=-0.14 avgRisk=Rs1272 maxDD=Rs13,625
+BUY        n= 51 win=41.2% gross=Rs   -8,988 charges=Rs   4,473 NET=Rs  -13,461 PF=0.71 avgR=-0.24 avgRisk=Rs1258 maxDD=Rs20,037
+SELL       n= 64 win=51.6% gross=Rs   11,706 charges=Rs   5,596 NET=Rs    6,110 PF=1.46 avgR=+0.11 avgRisk=Rs1206 maxDD=Rs4,878
+IN<2026-08-28 n= 67 win=41.8% gross=Rs   -8,556 charges=Rs   5,930 NET=Rs  -14,486 PF=0.77 avgR=-0.16 avgRisk=Rs1278 maxDD=Rs20,235
+OUT>=2026-08-28 n= 48 win=54.2% gross=Rs   11,274 charges=Rs   4,138 NET=Rs    7,136 PF=1.59 avgR=+0.11 avgRisk=Rs1160 maxDD=Rs4,185
+=== MAXSTOP_0.45 | sessions=both max_trades=2 target_r=3.5 stop%=[0.18,0.45] ===
+ALL        n= 31 win=41.9% gross=Rs    3,835 charges=Rs   2,695 NET=Rs    1,140 PF=1.36 avgR=+0.02 avgRisk=Rs903 maxDD=Rs3,625
+MORNING    n= 23 win=47.8% gross=Rs    4,812 charges=Rs   1,996 NET=Rs    2,816 PF=1.65 avgR=+0.14 avgRisk=Rs913 maxDD=Rs2,628
+COMEX      n=  8 win=25.0% gross=Rs     -977 charges=Rs     699 NET=Rs   -1,676 PF=0.68 avgR=-0.30 avgRisk=Rs877 maxDD=Rs1,676
+BUY        n= 12 win=41.7% gross=Rs   -1,836 charges=Rs   1,031 NET=Rs   -2,867 PF=0.71 avgR=-0.29 avgRisk=Rs901 maxDD=Rs3,355
+SELL       n= 19 win=42.1% gross=Rs    5,671 charges=Rs   1,664 NET=Rs    4,007 PF=2.33 avgR=+0.22 avgRisk=Rs905 maxDD=Rs2,008
+IN<2026-09-25 n= 16 win=31.2% gross=Rs    1,726 charges=Rs   1,419 NET=Rs      307 PF=1.28 avgR=+0.04 avgRisk=Rs941 maxDD=Rs3,206
+OUT>=2026-09-25 n= 15 win=53.3% gross=Rs    2,109 charges=Rs   1,276 NET=Rs      833 PF=1.49 avgR=+0.00 avgRisk=Rs863 maxDD=Rs3,625
