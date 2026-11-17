@@ -353,10 +353,11 @@ def evaluate_aurum_signal(
             )
     gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
 
-    # 4B. Higher-Timeframe Daily Macro Trend Filter
-    # Only take Long breakouts when Daily Close >= Daily 50 EMA and Price >= Daily 50 EMA.
-    # Only take Short breakdowns when Daily Close <= Daily 50 EMA and Price <= Daily 50 EMA.
-    if daily_candles:
+    # 4B. Optional Higher-Timeframe Daily Macro Trend Filter (opt-in via config.use_daily_ema50_gate)
+    # 1-year empirical audit showed the lagging Daily 50-EMA degraded SILVERMIC net PnL from
+    # +Rs 364 (PF 1.29) to -Rs 4,154 (PF 0.63) by buying tops and blocking early breakdowns,
+    # so this gate is disabled by default unless explicitly enabled in config.
+    if daily_candles and getattr(config, "use_daily_ema50_gate", False):
         comp_daily = [c for c in daily_candles if getattr(c, "is_complete", True)]
         if len(comp_daily) >= 50:
             d_closes = [c.close for c in comp_daily]
@@ -690,7 +691,7 @@ def evaluate_signal(
     Fails closed: Any failed gate or missing/stale data results in WAIT.
     For MCX Bullion / Commodity instruments, executes Dual-Playbook Engine (Playbook A & Playbook B).
     """
-    is_commodity = any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS"))
+    is_commodity = any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "NATGAS", "ALUM", "LEAD"))
     if is_commodity:
         return evaluate_aurum_signal(
             symbol=symbol,
@@ -974,10 +975,11 @@ def evaluate_signal(
             )
         gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
 
-    # 4B. Higher-Timeframe Daily Macro Trend Filter
-    # Only take Long breakouts when Daily Close >= Daily 50 EMA and Price >= Daily 50 EMA.
-    # Only take Short breakdowns when Daily Close <= Daily 50 EMA and Price <= Daily 50 EMA.
-    if daily_candles:
+    # 4B. Optional Higher-Timeframe Daily Macro Trend Filter (opt-in via config.use_daily_ema50_gate)
+    # 1-year empirical audit showed the lagging Daily 50-EMA degraded SILVERMIC net PnL from
+    # +Rs 364 (PF 1.29) to -Rs 4,154 (PF 0.63) by buying tops and blocking early breakdowns,
+    # so this gate is disabled by default unless explicitly enabled in config.
+    if daily_candles and getattr(config, "use_daily_ema50_gate", False):
         comp_daily = [c for c in daily_candles if getattr(c, "is_complete", True)]
         if len(comp_daily) >= 50:
             d_closes = [c.close for c in comp_daily]

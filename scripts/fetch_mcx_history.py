@@ -41,9 +41,10 @@ def main(days_back: int = 370):
         end = now
         while end > now - timedelta(days=days_back):
             start = end - timedelta(days=25)
-            # Skip fetching if this 25-day window is already well populated in bars
+            # Skip fetching if this 25-day window is already well populated AND covers up to near `end`
             in_window = [k for k in bars if start <= k <= end]
-            if len(in_window) >= 1500:
+            latest_in_win = max(in_window) if in_window else None
+            if len(in_window) >= 1500 and latest_in_win is not None and (end - latest_in_win) <= timedelta(days=3):
                 end = start
                 continue
 

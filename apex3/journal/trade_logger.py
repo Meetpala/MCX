@@ -18,7 +18,8 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from apex3.models import Side
-from apex3.strategy.sizer import calculate_zerodha_intraday_charges
+from apex3.strategy.risk import get_mcx_lot_multiplier
+from apex3.strategy.sizer import calculate_mcx_intraday_charges, calculate_zerodha_intraday_charges
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -144,13 +145,15 @@ class TradeLogger:
                 "================================================================================\n"
                 "APEX-3 LIVE TRADE AUDIT LOG (info.log)\n"
                 "--------------------------------------------------------------------------------\n"
-                "System        : APEX-3 Quant Intraday Engine (Zerodha MIS / Angel One Hybrid)\n"
-                f"Audit Start   : {self.start_date_str} (Tomorrow Onwards — Past Trades Excluded)\n"
-                "Capital Base  : Rs. 15,000 | Max Risk/Trade: Rs. 120.00 | Max Friction: < 26.0%\n"
+                "System        : AURUM-APEX MCX Quantitative Engine (Angel One Feed / Zerodha Exec)\n"
+                "Active Target : SILVERMIC (MCX Commodity Futures | Dual-Playbook + Daily 50-EMA)\n"
+                f"Audit Start   : {self.start_date_str} (Forward Live & Session Reconciliation)\n"
+                "Capital Mode  : Dynamic Live Commodity Margin (Default Paper Base: Rs. 30,000)\n"
+                "Risk Controls : 0.18%-0.45% Stop Bounds | 4.5R Ratchet | Max Friction < 18.0%\n"
                 "Sync Protocol : Autonomous & Resilient (Updates upon internet connect / run)\n"
                 "================================================================================\n\n"
                 f"[{now_str}] INFO.LOG INITIALIZED\n"
-                f"Awaiting trading sessions starting from {self.start_date_str} 09:15 IST.\n"
+                f"Awaiting MCX trading sessions starting from {self.start_date_str} 09:00 IST.\n"
                 "All future trade executions, fills, exits, and PnL audits will be recorded below.\n"
                 "================================================================================\n\n"
             )
@@ -286,30 +289,47 @@ class TradeLogger:
         if self.is_recorded(trade_id, order_id):
             return False
 
+        exch_str = "MCX" if any(k in symbol.upper() for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")) else "NSE"
+        qty_unit = "lots" if exch_str == "MCX" else "shares"
+        lot_mult = get_mcx_lot_multiplier(symbol) if exch_str == "MCX" else 1
+
         # Compute Gross PnL
         # If exit_side is SELL, original position was BUY (Long)
         if side == Side.SELL:
-            gross_pnl = (exit_price - entry_price) * quantity
+            gross_pnl = (exit_price - entry_price) * quantity * lot_mult
             buy_px, sell_px = entry_price, exit_price
             exit_side_str = "SELL (Close LONG)"
         else:
-            gross_pnl = (entry_price - exit_price) * quantity
+            gross_pnl = (entry_price - exit_price) * quantity * lot_mult
             buy_px, sell_px = exit_price, entry_price
             exit_side_str = "BUY (Cover SHORT)"
 
-        # Exact Zerodha intraday statutory friction (matches sizer.py & accounting.py)
-        buy_turnover = buy_px * quantity
-        sell_turnover = sell_px * quantity
-        turnover = buy_turnover + sell_turnover
-        brokerage = min(20.0, buy_turnover * 0.0003) + min(20.0, sell_turnover * 0.0003)
-        stt = sell_turnover * 0.00025
-        exchange_txn = turnover * 0.0000318
-        sebi_turnover = turnover * 0.000001
-        gst = (brokerage + exchange_txn + sebi_turnover) * 0.18
-        stamp_duty = buy_turnover * 0.00003
-        charges = round(brokerage + stt + exchange_txn + gst + stamp_duty + sebi_turnover, 2)
+        if exch_str == "MCX":
+            mcx_ch = calculate_mcx_intraday_charges(buy_px, sell_px, quantity, lot_mult)
+            charges = round(float(mcx_ch if isinstance(mcx_ch, (int, float)) else getattr(mcx_ch, "total", 0.0)), 2)
+            brokerage = round(float(getattr(mcx_ch, "brokerage", 40.0)), 2)
+            stt = round(float(getattr(mcx_ch, "ctt", 0.0)), 2)
+            exchange_txn = round(float(getattr(mcx_ch, "exchange_txn", 0.0)), 2)
+            gst = round(float(getattr(mcx_ch, "gst", 0.0)), 2)
+            stamp_duty = round(float(getattr(mcx_ch, "stamp_duty", 0.0)), 2)
+            tax_label = "CTT"
+            margin_employed = (entry_price * quantity * lot_mult) * 0.12
+        else:
+            # Exact Zerodha intraday statutory friction (matches sizer.py & accounting.py)
+            buy_turnover = buy_px * quantity
+            sell_turnover = sell_px * quantity
+            turnover = buy_turnover + sell_turnover
+            brokerage = min(20.0, buy_turnover * 0.0003) + min(20.0, sell_turnover * 0.0003)
+            stt = sell_turnover * 0.00025
+            exchange_txn = turnover * 0.0000318
+            sebi_turnover = turnover * 0.000001
+            gst = (brokerage + exchange_txn + sebi_turnover) * 0.18
+            stamp_duty = buy_turnover * 0.00003
+            charges = round(brokerage + stt + exchange_txn + gst + stamp_duty + sebi_turnover, 2)
+            tax_label = "STT"
+            margin_employed = (entry_price * quantity) / 4.0
+
         net_pnl = round(gross_pnl - charges, 2)
-        margin_employed = (entry_price * quantity) / 4.0
         ret_on_margin = (net_pnl / margin_employed * 100.0) if margin_employed > 0 else 0.0
 
         # R-Multiple calculation
@@ -348,10 +368,10 @@ class TradeLogger:
             f"[{exit_time_str}] TRADE EXECUTION — POSITION CLOSED ({exit_reason.upper()})\n"
             f"[RECORD_ID: {unique_id}]\n"
             "--------------------------------------------------------------------------------\n"
-            f"Symbol          : {symbol} (NSE)\n"
+            f"Symbol          : {symbol} ({exch_str})\n"
             f"Exit Action     : {exit_side_str}\n"
             f"Exit Reason     : {exit_reason}\n"
-            f"Shares Traded   : {quantity} shares\n"
+            f"Quantity Traded : {quantity} {qty_unit}\n"
             f"Entry Price     : Rs. {entry_price:,.2f}\n"
             f"Exit Fill Price : Rs. {exit_price:,.2f}\n"
             f"Entry Time (IST): {entry_time_str}\n"
@@ -361,7 +381,7 @@ class TradeLogger:
             f"Exit Trade ID   : {trade_id or 'N/A'}\n"
             "--------------------------------------------------------------------------------\n"
             f"Gross PnL       : {gross_sign}Rs. {gross_pnl:,.2f}\n"
-            f"Zerodha Friction: Rs. {charges:,.2f} (Brokerage: Rs. {brokerage:.2f} | STT: Rs. {stt:.2f} | Txn: Rs. {exchange_txn:.2f} | GST: Rs. {gst:.2f} | Stamp: Rs. {stamp_duty:.2f})\n"
+            f"Zerodha Friction: Rs. {charges:,.2f} (Brokerage: Rs. {brokerage:.2f} | {tax_label}: Rs. {stt:.2f} | Txn: Rs. {exchange_txn:.2f} | GST: Rs. {gst:.2f} | Stamp: Rs. {stamp_duty:.2f})\n"
             f"Net Realized PnL: {net_sign}Rs. {net_pnl:,.2f} ({ret_on_margin:+.2f}% on margin)\n"
             f"Realized R-Mult : {r_multiple:+.2f}R\n"
             f"Friction Ratio  : {friction_pct_str}\n"
@@ -568,15 +588,16 @@ class TradeLogger:
         self,
         session_date: date,
         trades_count: int = 0,
-        notes: str = "No qualifying 9-gate institutional breakouts / System in Risk-Off mode",
+        notes: str = "No qualifying MCX AURUM-APEX setups (Dual-Playbook + Daily 50-EMA Gate) / System Flat",
         timestamp: Optional[datetime] = None,
-        cumulative_pnl: float = 222.88,
+        cumulative_pnl: float = 0.0,
+        starting_capital: float = 30000.0,
     ) -> bool:
         """Record a formal daily trading session reconciliation into info.log.
 
         Ensures that every completed trading day (Monday-Friday) has an unbroken,
         verifiable audit log entry even if the system was offline, broker was disconnected,
-        or zero setups met all 9 institutional gates.
+        or zero setups met all institutional gates.
         """
         if session_date < self.start_date:
             return False
@@ -586,10 +607,10 @@ class TradeLogger:
             return False
 
         weekday_name = session_date.strftime("%A")
-        ts = timestamp or datetime(session_date.year, session_date.month, session_date.day, 15, 30, 0, tzinfo=IST)
+        ts = timestamp or datetime(session_date.year, session_date.month, session_date.day, 23, 30, 0, tzinfo=IST)
         ts_str = ts.strftime("%Y-%m-%d %H:%M:%S IST")
         date_str = session_date.strftime("%Y-%m-%d")
-        equity = 15000.0 + cumulative_pnl
+        equity = starting_capital + cumulative_pnl
         pnl_sign = "+" if cumulative_pnl > 0 else ""
 
         session_block = (
@@ -598,11 +619,11 @@ class TradeLogger:
             f"[RECORD_ID: {unique_id}]\n"
             "--------------------------------------------------------------------------------\n"
             f"Session Date    : {date_str} ({weekday_name})\n"
-            "Market Status   : NSE Cash Equities Intraday Session Closed\n"
+            "Market Status   : MCX Commodity Futures Intraday Session Closed (SILVERMIC)\n"
             f"Trades Executed : {trades_count} trades\n"
             f"Execution Notes : {notes}\n"
             "Position State  : 0 Open Positions (100% Flat / Zero Overnight Risk)\n"
-            "Starting Capital: Rs. 15,000.00\n"
+            f"Starting Capital: Rs. {starting_capital:,.2f}\n"
             "Capital at Risk : Rs. 0.00 (100% Capital Preserved)\n"
             "Gross Session PnL: Rs. 0.00\n"
             "Total Friction  : Rs. 0.00\n"
@@ -643,8 +664,11 @@ class TradeLogger:
         except Exception:
             content = ""
 
-        # Find latest session/timestamp date already in content so we never append out-of-order past dates
-        existing_dates = re.findall(r"\[(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+IST\]", content)
+        # Find latest session/trade date already in content (ignore INFO.LOG INITIALIZED banner)
+        existing_dates = re.findall(
+            r"\[(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}\s+IST\]\s+(?:TRADING SESSION AUDIT|TRADE EXECUTION)",
+            content,
+        )
         max_existing_date = self.start_date
         for d_str in existing_dates:
             try:

@@ -51,7 +51,7 @@ class HybridBrokerAdapter(BrokerInterface):
         """Infer exchange accurately, prioritizing MCX for commodity symbols."""
         if exchange and exchange != "NSE":
             return exchange
-        if any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "MCX")):
+        if any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "NATGAS", "ALUM", "LEAD", "MCX")):
             return "MCX"
         return exchange or "NSE"
 

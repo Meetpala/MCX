@@ -97,6 +97,16 @@ MCX_LOT_MULTIPLIERS: dict[str, int] = {
     "GOLDM": 10,
     "SILVER": 30,
     "GOLD": 100,
+    "CRUDEOILM": 10,
+    "CRUDEOIL": 100,
+    "NATGASMINI": 250,
+    "NATURALGAS": 1250,
+    "ZINCMINI": 1000,
+    "ZINC": 5000,
+    "ALUMINI": 1000,
+    "ALUMINIUM": 5000,
+    "LEADMINI": 1000,
+    "COPPER": 2500,
 }
 
 

@@ -208,24 +208,29 @@ class SessionScheduler:
     def is_past_flat_target(self, at_time: Optional[datetime] = None) -> bool:
         """Check if we're past the target time to be flat.
 
-        This is 14:58 IST by default. If not flat by this time,
-        the system should escalate alerts.
+        Uses dynamic MCX flatten target (flatten_start + 5 min) on MCX and
+        configured equity flat_target (14:58 / 15:20 IST) on NSE.
         """
         now = at_time or self.now_ist()
         now_time = now.timetz().replace(tzinfo=None)
+        if getattr(self._config, "exchange", "NSE").upper() == "MCX":
+            _, _, _, _, f_start, m_close = self._get_times_for_date(now.date())
+            flat_t = (datetime.combine(now.date(), f_start) + timedelta(minutes=5)).time()
+            return now_time >= min(flat_t, m_close)
         return now_time >= self._flat_target
 
     def is_past_hard_deadline(self, at_time: Optional[datetime] = None) -> bool:
-        """Check if we're past the hard deadline (15:00 IST).
+        """Check if we're past the hard deadline.
 
-        Any remaining strategy position at this point is a critical
-        failure requiring operator intervention.
-
-        WARNING: Never claim the broker will guarantee an exit.
-        The strategy's own earlier exit is the control.
+        Uses dynamic MCX close deadline (market_close - 5 min) on MCX and
+        configured equity hard_deadline (15:00 / 15:25 IST) on NSE.
         """
         now = at_time or self.now_ist()
         now_time = now.timetz().replace(tzinfo=None)
+        if getattr(self._config, "exchange", "NSE").upper() == "MCX":
+            _, _, _, _, _, m_close = self._get_times_for_date(now.date())
+            hard_t = (datetime.combine(now.date(), m_close) - timedelta(minutes=5)).time()
+            return now_time >= hard_t
         return now_time >= self._hard_deadline
 
     def is_opening_range_period(self, at_time: Optional[datetime] = None) -> bool:

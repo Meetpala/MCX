@@ -391,7 +391,7 @@ class KiteAdapter(BrokerInterface):
         self._require_kite()
         self._acquire_rate_limit("orders")
         exchange = request.exchange or "MCX"
-        if exchange == "NSE" and any(k in request.symbol for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")):
+        if exchange == "NSE" and any(k in request.symbol.upper() for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS", "NATGAS", "ALUM", "LEAD")):
             exchange = "MCX"
         order_type_str = request.order_type.value
         params = [{
@@ -460,7 +460,7 @@ class KiteAdapter(BrokerInterface):
         )
 
         exchange = request.exchange or "MCX"
-        if exchange == "NSE" and any(k in request.symbol for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS")):
+        if exchange == "NSE" and any(k in request.symbol.upper() for k in ("GOLD", "SILVER", "COPPER", "ZINC", "CRUDE", "NATURALGAS", "NATGAS", "ALUM", "LEAD")):
             exchange = "MCX"
 
         order_id = self._kite.place_order(

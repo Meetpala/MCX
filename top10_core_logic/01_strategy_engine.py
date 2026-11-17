@@ -642,7 +642,7 @@ class StrategyEngine:
         is_mcx_conf = getattr(self.config, "exchange", "NSE").upper() == "MCX"
         effective_target_r = (
             max(float(getattr(self.config.stops, "target_r", 4.5)), 4.5)
-            if (is_mcx_conf and self.config.stops.trail_enabled)
+            if is_mcx_conf
             else self.config.stops.target_r
         )
 
@@ -1492,20 +1492,28 @@ class StrategyEngine:
                         )
                         continue
 
-                # 2. Trailing Stop Management (active only when trail_enabled is True)
-                if self.config.stops.trail_enabled:
+                # 2. Trailing Stop Management (active when trail_enabled is True or for MCX commodity positions)
+                pos_is_mcx = (getattr(inst_info, "exchange", "") == "MCX") or any(
+                    pos.symbol.upper().startswith(r)
+                    for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "NATGAS", "ALUM", "LEAD")
+                )
+                if self.config.stops.trail_enabled or pos_is_mcx:
                     candles_5m = self.broker.get_historical(pos.symbol, "5minute", hist_from_5m, now)
                     candles_1m = self.broker.get_historical(pos.symbol, "minute", hist_from_1m, now)
 
-                    atr_series = compute_atr(
-                        [c.high for c in candles_5m],
-                        [c.low for c in candles_5m],
-                        [c.close for c in candles_5m],
-                        period=self.config.stops.initial_atr_period,
+                    atr_series = (
+                        compute_atr(
+                            [c.high for c in candles_5m],
+                            [c.low for c in candles_5m],
+                            [c.close for c in candles_5m],
+                            period=self.config.stops.initial_atr_period,
+                        )
+                        if candles_5m
+                        else []
                     )
                     atr_val = atr_series[-1] if atr_series else (current_price * 0.01)
 
-                    if getattr(self.config, "exchange", "MCX") == "MCX":
+                    if pos_is_mcx:
                         from apex3.strategy.trail import evaluate_progressive_ratchet
                         trail_eval = evaluate_progressive_ratchet(
                             pos=pos.to_position_state(),
@@ -2133,15 +2141,24 @@ class StrategyEngine:
                 or_range = build_opening_range(sym, stock_candles, session_date=session_date, session_type=curr_sess_type)
                 self.opening_ranges[sym] = or_range
 
-            # For MCX Bullion, derive commodity-specific trend if broad equity benchmark is neutral/closed
+            # For MCX Commodities, ALWAYS derive commodity-specific trend from its OWN 5m candles
+            # (never inherit NSE NIFTY 50 equity index regime, which can be inversely correlated to Silver/Crude)
             sym_regime = regime_eval.regime
-            if is_mcx and sym_regime in (MarketRegime.NEUTRAL, MarketRegime.WAITING):
+            inst_exch_r = getattr(inst, "exchange", None)
+            is_mcx_sym_r = (
+                (inst_exch_r == "MCX")
+                or any(sym.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "NATGAS", "ALUM", "LEAD"))
+                or (is_mcx and inst_exch_r != "NSE")
+            )
+            if is_mcx_sym_r:
                 comp_s = [c for c in stock_candles if getattr(c, "is_complete", True)]
-                if len(comp_s) >= 10:
+                sym_regime = MarketRegime.NEUTRAL
+                if len(comp_s) >= 5:
                     from apex3.strategy.regime import calculate_session_anchored_vwap
                     c_closes = [c.close for c in comp_s]
-                    c_ema20 = compute_ema(c_closes, 20)[-1] if len(c_closes) >= 20 else c_closes[-1]
-                    c_vwap, _ = calculate_session_anchored_vwap(comp_s)
+                    c_ema20 = compute_ema(c_closes, 20)[-1] if len(c_closes) >= 20 else (sum(c_closes) / len(c_closes))
+                    today_s = [c for c in comp_s if self._ensure_ist(c.timestamp).date() == session_date] or comp_s
+                    c_vwap, _ = calculate_session_anchored_vwap(today_s)
                     c_price = comp_s[-1].close
                     if c_price > c_ema20 and c_price > c_vwap:
                         sym_regime = MarketRegime.BULLISH
@@ -2251,6 +2268,9 @@ class StrategyEngine:
                                     target_r=self.config.stops.target_r,
                                     tick_size=c_tick,
                                 )
+                                _, _, sched_es, sched_ec, _, _ = self.scheduler._get_times_for_date(session_date)
+                                eff_start_hhmm = sched_es.strftime("%H:%M") if is_sym_mcx else self.config.schedule.entry_start
+                                eff_cutoff_hhmm = sched_ec.strftime("%H:%M") if is_sym_mcx else self.config.schedule.entry_cutoff
                                 late_val = validate_late_start_signal(
                                     symbol=sym,
                                     side=c_side,
@@ -2263,8 +2283,8 @@ class StrategyEngine:
                                     subsequent_candles=stock_candles,
                                     quote=quote,
                                     now_ist=now,
-                                    entry_start_hhmm=self.config.schedule.entry_start,
-                                    entry_cutoff_hhmm=self.config.schedule.entry_cutoff,
+                                    entry_start_hhmm=eff_start_hhmm,
+                                    entry_cutoff_hhmm=eff_cutoff_hhmm,
                                     max_price_drift_pct=slip_pct,
                                 )
                                 if late_val.is_valid:
@@ -2456,7 +2476,7 @@ class StrategyEngine:
             # within slip_pct of signal_price, stop-loss was not hit, and target was not hit.
             effective_target_r = (
                 max(float(getattr(self.config.stops, "target_r", 4.5)), 4.5)
-                if (is_sym_mcx and self.config.stops.trail_enabled)
+                if is_sym_mcx
                 else self.config.stops.target_r
             )
             if completed_stock_candles:
@@ -2472,6 +2492,9 @@ class StrategyEngine:
                         tick_size=tick,
                     )
                     or_obj = self.opening_ranges.get(sym)
+                    _, _, sched_es2, sched_ec2, _, _ = self.scheduler._get_times_for_date(session_date)
+                    eff_start_hhmm2 = sched_es2.strftime("%H:%M") if is_sym_mcx else self.config.schedule.entry_start
+                    eff_cutoff_hhmm2 = sched_ec2.strftime("%H:%M") if is_sym_mcx else self.config.schedule.entry_cutoff
                     late_val = validate_late_start_signal(
                         symbol=sym,
                         side=side,
@@ -2484,8 +2507,8 @@ class StrategyEngine:
                         subsequent_candles=stock_candles_map.get(sym) or stock_candles,
                         quote=quote,
                         now_ist=now,
-                        entry_start_hhmm=self.config.schedule.entry_start,
-                        entry_cutoff_hhmm=self.config.schedule.entry_cutoff,
+                        entry_start_hhmm=eff_start_hhmm2,
+                        entry_cutoff_hhmm=eff_cutoff_hhmm2,
                         max_price_drift_pct=slip_pct,
                     )
                     if not late_val.is_valid:

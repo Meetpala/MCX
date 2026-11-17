@@ -1,0 +1,28 @@
+services:
+  apex3-mcx:
+    build: .
+    container_name: apex3-mcx-engine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Kolkata
+      - APEX3_DASHBOARD_HOST=0.0.0.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./info.log:/app/info.log
+      - ./apex3_journal.db:/app/apex3_journal.db
+      - ./data:/app/data
+      - ./.env:/app/.env
+    command: >
+      python -m apex3.main
+      --mode ${APEX3_MODE:-paper}
+      --symbol ${APEX3_SYMBOLS:-SILVERMIC}
+      --host 0.0.0.0
+      --port 5000
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
