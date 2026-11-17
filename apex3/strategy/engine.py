@@ -142,6 +142,7 @@ class StrategyEngine:
         self.latest_regime_eval: Optional[Any] = None
         self.latest_session_pnl: Optional[Any] = None
         self._late_start_catchup_done: set[str] = set()
+        self._daily_candles_cache: dict[str, list[Candle]] = {}
         self._latest_margin_info: Optional[MarginInfo] = None
         self._consecutive_losses: int = 0
         self._last_trade_exit_time: Optional[datetime] = None
@@ -501,6 +502,7 @@ class StrategyEngine:
             self._current_session_date = session_date
             self.opening_ranges.clear()
             self._late_start_catchup_done.clear()
+            self._daily_candles_cache.clear()
             self._last_entry_bar_timestamp = None
             self._flatten_completed = False
         if self._daily_loss_halt_date is not None and self._daily_loss_halt_date != session_date:
@@ -2039,6 +2041,13 @@ class StrategyEngine:
             inst_map[sym] = self.broker.get_instrument_info(sym)
             s_candles = self.broker.get_historical(sym, "5minute", hist_from_5m, now)
             stock_candles_map[sym] = s_candles
+            if sym not in self._daily_candles_cache:
+                try:
+                    d_c = self.broker.get_historical(sym, "day", now - timedelta(days=120), now)
+                    if d_c:
+                        self._daily_candles_cache[sym] = d_c
+                except Exception as de:
+                    logger.debug("Could not fetch daily candles for %s: %s", sym, de)
             # Pre-build/cache opening range so late starts (e.g. 09:50 IST) reconstruct immediately
             if s_candles and (
                 sym not in self.opening_ranges
@@ -2163,6 +2172,7 @@ class StrategyEngine:
                 is_core_symbol=is_core,
                 macro_state=self.latest_macro_state,
                 sibling_candles_5m=sibling_candles,
+                daily_candles=self._daily_candles_cache.get(sym),
             )
             eval_candles = stock_candles
 
@@ -2204,6 +2214,7 @@ class StrategyEngine:
                                 is_core_symbol=is_core,
                                 macro_state=self.latest_macro_state,
                                 sibling_candles_5m=sibling_candles,
+                                daily_candles=self._daily_candles_cache.get(sym),
                             )
                             if catchup_sig.decision in (Decision.PROPOSED_LONG, Decision.PROPOSED_SHORT):
                                 c_tick = inst.tick_size if inst and inst.tick_size > 0 else 0.05

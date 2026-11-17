@@ -16,8 +16,13 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from apex3.alerts.notifier import AlertNotifier
 from apex3.broker.paper import PaperBroker
@@ -93,6 +98,7 @@ def run_app():
     parser.add_argument("--paper", action="store_true", help="Run in paper trading mode")
     parser.add_argument("--simulate", action="store_true", help="Run a simulated trading day and print report")
     parser.add_argument("--sync-trades", action="store_true", help="Sync broker trades to info.log and exit")
+    parser.add_argument("--symbol", type=str, default=None, help="Target trading symbol(s) (e.g. SILVERMIC)")
     parser.add_argument("--host", type=str, default=None, help="Dashboard host interface (e.g. 127.0.0.1)")
     parser.add_argument("--port", type=int, default=5000, help="Local operator dashboard port")
     args = parser.parse_args()
@@ -210,7 +216,11 @@ def run_app():
     engine = StrategyEngine(config=config, broker=broker, journal=journal, trade_logger=trade_logger)
 
     if config.exchange.upper() == "MCX":
-        mcx_roots = [item.symbol_root for item in config.universe.core_watchlist] or ["SILVERMIC", "GOLDGUINEA", "GOLDTEN"]
+        if getattr(args, "symbol", None):
+            mcx_roots = [s.strip().upper() for s in args.symbol.split(",") if s.strip()]
+        else:
+            # Institutional Production Default: Exclusively trade SILVERMIC to prevent micro-contract churning
+            mcx_roots = ["SILVERMIC"]
         resolved_symbols = list(mcx_roots)
         if hasattr(broker, "resolve_active_mcx_futures"):
             try:

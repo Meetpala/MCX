@@ -66,6 +66,8 @@ DEFAULT_ANGEL_TOKENS: dict[str, str] = {
     "GOLD": "256270",
 }
 
+MCX_COMMODITY_PREFIXES = ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS", "MCX")
+
 
 MCX_LOT_MULTIPLIERS: dict[str, int] = {
     "SILVERMIC": 1,
@@ -297,7 +299,7 @@ class AngelDataProvider:
     def resolve_token(self, symbol: str, exchange: str = "NSE") -> str:
         """Resolve exchange symbol token for Angel One. Fails closed on unmapped symbols."""
         clean = symbol.replace("-EQ", "").upper()
-        if exchange != "MCX" and clean.startswith(("SILVER", "GOLD")):
+        if exchange != "MCX" and clean.startswith(MCX_COMMODITY_PREFIXES):
             exchange = "MCX"
 
         # For equity, cached tokens are static; for MCX futures, dynamically resolve front-month
@@ -409,7 +411,7 @@ class AngelDataProvider:
         clean_symbols = [s.replace("-EQ", "").upper() for s in symbols]
         tokens_by_exchange: dict[str, dict[str, str]] = {}
         for sym in clean_symbols:
-            eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
+            eff_exch = "MCX" if sym.startswith(MCX_COMMODITY_PREFIXES) else exchange
             tok = self.resolve_token(sym, eff_exch)
             if tok:
                 if eff_exch not in tokens_by_exchange:
@@ -430,7 +432,7 @@ class AngelDataProvider:
         if not tokens_by_exchange or not self._smart_api:
             for sym in clean_symbols:
                 if sym not in quotes:
-                    eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
+                    eff_exch = "MCX" if sym.startswith(MCX_COMMODITY_PREFIXES) else exchange
                     quotes[sym] = Quote(
                         symbol=sym,
                         exchange=eff_exch,
@@ -450,7 +452,7 @@ class AngelDataProvider:
                 logger.warning("Rate limit timeout acquiring quotes token for batch (%d symbols)", total_tokens)
                 for sym in clean_symbols:
                     if sym not in quotes:
-                        eff_exch = "MCX" if sym.startswith(("SILVER", "GOLD")) else exchange
+                        eff_exch = "MCX" if sym.startswith(MCX_COMMODITY_PREFIXES) else exchange
                         quotes[sym] = Quote(
                             symbol=sym,
                             exchange=eff_exch,
@@ -534,7 +536,7 @@ class AngelDataProvider:
     ) -> list[Candle]:
         """Fetch historical candles from Angel One."""
         clean = symbol.replace("-EQ", "").upper()
-        eff_exch = "MCX" if clean.startswith(("SILVER", "GOLD")) else exchange
+        eff_exch = "MCX" if clean.startswith(MCX_COMMODITY_PREFIXES) else exchange
         token = self.resolve_token(clean, eff_exch)
 
         if from_dt is None:
@@ -707,7 +709,7 @@ class AngelDataProvider:
         """Fetch instrument info with verified circuit limits from exchange."""
         clean = symbol.replace("-EQ", "").upper()
         if exchange is None:
-            exchange = "MCX" if clean.startswith(("SILVER", "GOLD")) else "NSE"
+            exchange = "MCX" if clean.startswith(MCX_COMMODITY_PREFIXES) else "NSE"
         token = self.resolve_token(clean, exchange)
         low_c, up_c = self._circuit_cache.get(clean, (0.0, 0.0))
         tick = 1.0 if exchange == "MCX" else 0.05

@@ -16,7 +16,7 @@ ROOTS = ["SILVERMIC", "GOLDGUINEA", "GOLDTEN"]
 CACHE = ROOT / "data" / "mcx_5m_cache.pkl"
 
 
-def main(days_back: int = 240):
+def main(days_back: int = 370):
     cfg = load_config(str(ROOT / "apex3" / "config.yaml"))
     s = cfg.secrets
     a = AngelDataProvider(api_key=s.angel_api_key, client_code=s.angel_client_code, pin=s.angel_pin,
@@ -24,13 +24,29 @@ def main(days_back: int = 240):
                           rate_limiter=RateLimiter(rates={"orders": 10.0, "quotes": 5.0, "historical": 3.0}))
     res = a.resolve_active_mcx_futures(ROOTS)
     now = datetime.now(IST)
+    existing = {}
+    if CACHE.exists():
+        try:
+            existing = pickle.load(open(CACHE, "rb"))
+        except Exception:
+            existing = {}
+
     out = {}
     for r in ROOTS:
         sym = res[r].symbol
         bars = {}
+        if r in existing and "candles" in existing[r]:
+            for c in existing[r]["candles"]:
+                bars[c.timestamp] = c
         end = now
         while end > now - timedelta(days=days_back):
             start = end - timedelta(days=25)
+            # Skip fetching if this 25-day window is already well populated in bars
+            in_window = [k for k in bars if start <= k <= end]
+            if len(in_window) >= 1500:
+                end = start
+                continue
+
             chunk = []
             for attempt in range(4):
                 try:

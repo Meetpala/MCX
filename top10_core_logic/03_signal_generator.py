@@ -247,6 +247,7 @@ def evaluate_aurum_signal(
     is_entry_window: bool = True,
     sibling_candles_5m: Optional[list[Candle]] = None,
     macro_state: Optional[Any] = None,
+    daily_candles: Optional[list[Candle]] = None,
 ) -> SignalEvaluation:
     """Evaluate MCX Bullion Futures using AURUM-APEX Dual-Playbook Engine.
 
@@ -351,6 +352,58 @@ def evaluate_aurum_signal(
                 explanation=f"Macro news gate failed: {rej_code}",
             )
     gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
+
+    # 4B. Higher-Timeframe Daily Macro Trend Filter
+    # Only take Long breakouts when Daily Close >= Daily 50 EMA and Price >= Daily 50 EMA.
+    # Only take Short breakdowns when Daily Close <= Daily 50 EMA and Price <= Daily 50 EMA.
+    if daily_candles:
+        comp_daily = [c for c in daily_candles if getattr(c, "is_complete", True)]
+        if len(comp_daily) >= 50:
+            d_closes = [c.close for c in comp_daily]
+            d_ema50_s = compute_ema(d_closes, 50)
+            if d_ema50_s:
+                daily_trend_ema = d_ema50_s[-1]
+                latest_d_close = d_closes[-1]
+                chk_px = quote.last_price if (quote and quote.last_price > 0) else latest_d_close
+                if target_side == Side.BUY and (chk_px < daily_trend_ema or latest_d_close < daily_trend_ema):
+                    gates.append(
+                        GateResult(
+                            name="DAILY_MACRO_TREND",
+                            status=GateStatus.FAIL,
+                            reason=f"Daily macro trend is bearish (Price {chk_px:.2f} / Daily {latest_d_close:.2f} < Daily 50 EMA {daily_trend_ema:.2f})",
+                            data={"code": "MACRO_DAILY_TREND_BEARISH"},
+                        )
+                    )
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.WAIT,
+                        gates=gates,
+                        reason_codes=["MACRO_DAILY_TREND_BEARISH"],
+                        explanation=f"Long blocked: Market in daily markdown phase (Price {chk_px:.2f} < Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                elif target_side == Side.SELL and (chk_px > daily_trend_ema or latest_d_close > daily_trend_ema):
+                    gates.append(
+                        GateResult(
+                            name="DAILY_MACRO_TREND",
+                            status=GateStatus.FAIL,
+                            reason=f"Daily macro trend is bullish (Price {chk_px:.2f} / Daily {latest_d_close:.2f} > Daily 50 EMA {daily_trend_ema:.2f})",
+                            data={"code": "MACRO_DAILY_TREND_BULLISH"},
+                        )
+                    )
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.WAIT,
+                        gates=gates,
+                        reason_codes=["MACRO_DAILY_TREND_BULLISH"],
+                        explanation=f"Short blocked: Market in daily markup phase (Price {chk_px:.2f} > Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                gates.append(
+                    GateResult(
+                        name="DAILY_MACRO_TREND",
+                        status=GateStatus.PASS,
+                        reason=f"Daily macro trend aligned with {target_side.value} (Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                )
 
     # 5. Opening Range Verification
     if not opening_range.is_complete or opening_range.high <= opening_range.low:
@@ -630,14 +683,15 @@ def evaluate_signal(
     is_core_symbol: bool = True,
     macro_state: Optional[Any] = None,
     sibling_candles_5m: Optional[list[Candle]] = None,
+    daily_candles: Optional[list[Candle]] = None,
 ) -> SignalEvaluation:
     """Evaluate a single stock or MCX commodity for entry signal.
 
     Fails closed: Any failed gate or missing/stale data results in WAIT.
-    For MCX Bullion instruments, executes Dual-Playbook Engine (Playbook A & Playbook B).
+    For MCX Bullion / Commodity instruments, executes Dual-Playbook Engine (Playbook A & Playbook B).
     """
-    is_bullion = any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD"))
-    if is_bullion:
+    is_commodity = any(symbol.upper().startswith(r) for r in ("SILVER", "GOLD", "CRUDE", "COPPER", "ZINC", "NATURALGAS"))
+    if is_commodity:
         return evaluate_aurum_signal(
             symbol=symbol,
             candles_5m=stock_candles_5m,
@@ -650,6 +704,7 @@ def evaluate_signal(
             is_entry_window=is_entry_window,
             sibling_candles_5m=sibling_candles_5m,
             macro_state=macro_state,
+            daily_candles=daily_candles,
         )
 
     gates: list[GateResult] = []
@@ -918,6 +973,58 @@ def evaluate_signal(
                 explanation=f"Macro news gate failed: {rej_code}",
             )
         gates.append(GateResult(name="MACRO_NEWS", status=GateStatus.PASS, reason="Macro news clear"))
+
+    # 4B. Higher-Timeframe Daily Macro Trend Filter
+    # Only take Long breakouts when Daily Close >= Daily 50 EMA and Price >= Daily 50 EMA.
+    # Only take Short breakdowns when Daily Close <= Daily 50 EMA and Price <= Daily 50 EMA.
+    if daily_candles:
+        comp_daily = [c for c in daily_candles if getattr(c, "is_complete", True)]
+        if len(comp_daily) >= 50:
+            d_closes = [c.close for c in comp_daily]
+            d_ema50_s = compute_ema(d_closes, 50)
+            if d_ema50_s:
+                daily_trend_ema = d_ema50_s[-1]
+                latest_d_close = d_closes[-1]
+                chk_px = quote.last_price if (quote and quote.last_price > 0) else latest_d_close
+                if target_side == Side.BUY and (chk_px < daily_trend_ema or latest_d_close < daily_trend_ema):
+                    gates.append(
+                        GateResult(
+                            name="DAILY_MACRO_TREND",
+                            status=GateStatus.FAIL,
+                            reason=f"Daily macro trend is bearish (Price {chk_px:.2f} / Daily {latest_d_close:.2f} < Daily 50 EMA {daily_trend_ema:.2f})",
+                            data={"code": "MACRO_DAILY_TREND_BEARISH"},
+                        )
+                    )
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.WAIT,
+                        gates=gates,
+                        reason_codes=["MACRO_DAILY_TREND_BEARISH"],
+                        explanation=f"Long blocked: Market in daily markdown phase (Price {chk_px:.2f} < Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                elif target_side == Side.SELL and (chk_px > daily_trend_ema or latest_d_close > daily_trend_ema):
+                    gates.append(
+                        GateResult(
+                            name="DAILY_MACRO_TREND",
+                            status=GateStatus.FAIL,
+                            reason=f"Daily macro trend is bullish (Price {chk_px:.2f} / Daily {latest_d_close:.2f} > Daily 50 EMA {daily_trend_ema:.2f})",
+                            data={"code": "MACRO_DAILY_TREND_BULLISH"},
+                        )
+                    )
+                    return SignalEvaluation(
+                        symbol=symbol,
+                        decision=Decision.WAIT,
+                        gates=gates,
+                        reason_codes=["MACRO_DAILY_TREND_BULLISH"],
+                        explanation=f"Short blocked: Market in daily markup phase (Price {chk_px:.2f} > Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                gates.append(
+                    GateResult(
+                        name="DAILY_MACRO_TREND",
+                        status=GateStatus.PASS,
+                        reason=f"Daily macro trend aligned with {target_side.value} (Daily 50 EMA {daily_trend_ema:.2f})",
+                    )
+                )
 
     # 4. Opening Range Breakout Gate (with Breakout Cushion & CLV Conviction)
     cushion_mult = getattr(config, "min_breakout_cushion_atr", 0.15)
